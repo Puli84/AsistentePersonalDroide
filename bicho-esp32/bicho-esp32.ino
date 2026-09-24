@@ -21,6 +21,7 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include <Preferences.h>
 #include "driver/i2s_std.h"
 #include "config.h"
 
@@ -44,7 +45,9 @@ const int MIC_HZ = 16000;              // lo que espera el servidor
 const int ALTAVOZ_HZ = 24000;          // lo que devuelve la voz de OpenAI
 const int MUESTRAS_POR_TROZO = 512;    // 32 ms de audio por mensaje
 const int GANANCIA_MIC = 14;           // desplazamiento 32→16 bits: menor = más volumen (12..16)
-const int VOLUMEN = 70;                // volumen del altavoz, 0..100
+// Volumen del altavoz, 0..100: 50 = la voz tal cual, 100 = el doble. Se cambia por voz
+// ("sube el volumen") y se guarda en la memoria de la placa. Este es el valor de la primera vez.
+const int VOLUMEN_INICIAL = 80;
 const unsigned long MAX_GRABACION_MS = 15000;
 const unsigned long MAX_ESPERA_RESPUESTA_MS = 30000;
 
@@ -68,6 +71,9 @@ i2s_chan_handle_t canalAltavoz = nullptr;
 
 int32_t bufMic[MUESTRAS_POR_TROZO];
 int16_t bufEnvio[MUESTRAS_POR_TROZO];
+
+Preferences prefs;
+int volumen = VOLUMEN_INICIAL;
 
 bool micActivo = false;
 bool botonAntes = false;           // para detectar solo el momento de pulsar
@@ -145,7 +151,10 @@ void reproducir(uint8_t* datos, size_t longitud) {
   int16_t* muestras = (int16_t*) datos;
   size_t n = longitud / sizeof(int16_t);
   for (size_t i = 0; i < n; i++) {
-    muestras[i] = (int16_t) ((int32_t) muestras[i] * VOLUMEN / 100);
+    int32_t s = (int32_t) muestras[i] * volumen / 50;   // 50 = tal cual, 100 = x2
+    if (s > 32767) s = 32767;
+    if (s < -32768) s = -32768;
+    muestras[i] = (int16_t) s;
   }
   size_t escritos = 0;
   i2s_channel_write(canalAltavoz, datos, n * sizeof(int16_t), &escritos, portMAX_DELAY);
@@ -214,6 +223,12 @@ void alMensajeTexto(uint8_t* payload, size_t longitud) {
     comandoRuedas(doc);
     return;
   }
+  if (doc["cmd"] == "volumen") {
+    volumen = constrain((int) (doc["valor"] | volumen), 0, 100);
+    prefs.putInt("volumen", volumen);
+    Serial.printf("Volumen: %d\n", volumen);
+    return;
+  }
   String tipo = doc["tipo"] | "";
   if (tipo == "audio_inicio") {
     cambiarModo(HABLANDO);
@@ -231,6 +246,11 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
     case WStype_CONNECTED:
       conectado = true;
       Serial.println("Conectado al servidor del bicho");
+      {
+        char hola[48];
+        snprintf(hola, sizeof(hola), "{\"tipo\":\"hola\",\"volumen\":%d}", volumen);
+        ws.sendTXT(hola);
+      }
       break;
     case WStype_DISCONNECTED:
       if (conectado) Serial.println("Desconectado del servidor, reintentando...");
@@ -271,6 +291,10 @@ void setup() {
   Serial.println("\n== bicho-esp32 ==");
 
   pinMode(PIN_BOTON, INPUT_PULLUP);
+
+  prefs.begin("bicho", false);
+  volumen = prefs.getInt("volumen", VOLUMEN_INICIAL);
+  Serial.printf("Volumen guardado: %d\n", volumen);
 
   ledcAttach(PIN_RUEDA_IZQ, 50, 14);
   ledcAttach(PIN_RUEDA_DER, 50, 14);

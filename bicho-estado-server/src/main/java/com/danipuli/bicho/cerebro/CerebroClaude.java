@@ -79,6 +79,8 @@ public class CerebroClaude {
             girar, bailar... Para bailar o hacer secuencias, llama varias veces con movimientos cortos.
             - Tienes una cara con emociones (herramienta poner_cara). Úsala cuando tu emoción cambie de \
             forma clara; no hace falta en cada frase.
+            - Tienes un altavoz (herramienta cambiar_volumen, de 0 a 100). Úsala cuando te pidan \
+            hablar más alto o más bajo; si piden "sube" o "baja" sin decir cuánto, cambia unos 15 puntos.
             - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
             - Si una herramienta te dice que no hay robot conectado, puedes contarlo de pasada.
 
@@ -137,7 +139,8 @@ public class CerebroClaude {
         this.velocidadMax = velocidadMax;
         this.estado = estado;
         this.robot = robot;
-        this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar());
+        this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
+                herramientaVolumen());
         cargarConversacion();
         if (!configurado) {
             log.warn("Falta la API key de Anthropic: ponla en src/main/resources/secrets.properties (bicho.anthropic.api-key)");
@@ -179,7 +182,7 @@ public class CerebroClaude {
         StringBuilder texto = new StringBuilder();
         List<Map<String, Object>> acciones = new ArrayList<>();
         // Se lee en cada turno: así puedes cambiar la personalidad sin reiniciar el servidor
-        String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionMemoria();
+        String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionVolumen() + seccionMemoria();
 
         for (int vuelta = 0; vuelta < MAX_VUELTAS_HERRAMIENTAS; vuelta++) {
             MessageCreateParams params = MessageCreateParams.builder()
@@ -247,6 +250,22 @@ public class CerebroClaude {
         } catch (IOException ex) {
             log.warn("No se pudo borrar {}: {}", ficheroConversacion, ex.getMessage());
         }
+    }
+
+    private String seccionVolumen() {
+        int volumen = robot.getVolumen();
+        return volumen < 0 ? "" : "\nVolumen actual de tu altavoz: " + volumen + " de 100.\n";
+    }
+
+    private String cambiarVolumen(Map<String, Object> entrada, List<Map<String, Object>> acciones) {
+        int anterior = robot.getVolumen();
+        int nuevo = (int) recortar(numero(entrada.get("volumen"), 50), 0, 100);
+        robot.cambiarVolumen(nuevo);
+        acciones.add(Map.of("cmd", "volumen", "valor", nuevo));
+        String hecho = "Volumen puesto a " + nuevo + (anterior >= 0 ? " (antes " + anterior + ")." : ".");
+        return robot.hayRobotConectado()
+                ? hecho
+                : hecho + " (Aviso: no hay ninguna ESP32 conectada, así que no ha cambiado de verdad.)";
     }
 
     // ------------------------------------------------------------------ memoria
@@ -328,6 +347,7 @@ public class CerebroClaude {
             case "mover_ruedas" -> moverRuedas(entrada, acciones);
             case "poner_cara" -> ponerCara(entrada, acciones);
             case "recordar" -> recordar(entrada);
+            case "cambiar_volumen" -> cambiarVolumen(entrada, acciones);
             default -> "Error: herramienta desconocida " + uso.name();
         };
     }
@@ -390,6 +410,23 @@ public class CerebroClaude {
                                                 + duracionMaxMs + ")")))
                                 .build())
                         .required(List.of("accion", "velocidad", "duracion_ms"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaVolumen() {
+        return Tool.builder()
+                .name("cambiar_volumen")
+                .description("Cambia el volumen de tu altavoz. 0 es en silencio, 50 normal, 100 lo más alto.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("volumen", JsonValue.from(Map.of(
+                                        "type", "integer",
+                                        "description", "Volumen nuevo, de 0 a 100")))
+                                .build())
+                        .required(List.of("volumen"))
                         .putAdditionalProperty("additionalProperties", JsonValue.from(false))
                         .build())
                 .build();

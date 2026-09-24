@@ -37,6 +37,10 @@ import java.util.concurrent.CopyOnWriteArraySet;
  *   binario PCM 16 bits, mono, 16 kHz, little-endian (varios trozos)
  *   texto   { "tipo": "fin_audio" }
  *   texto   { "tipo": "reproduccion_fin" }     ← cuando termina de decir la respuesta
+ *   texto   { "tipo": "hola", "volumen": 70 }  ← al conectar
+ *
+ * Servidor → ESP32, otros comandos:
+ *   { "cmd": "volumen", "valor": 80 }
  *
  * Servidor → esa ESP32, la respuesta hablada:
  *   texto   { "tipo": "audio_inicio", "sample_rate": 24000 }
@@ -60,6 +64,9 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     private final Map<String, ByteArrayOutputStream> grabaciones = new ConcurrentHashMap<>();
     private final ApplicationEventPublisher eventos;
     private final EstadoWebSocketHandler estado;
+
+    /** Volumen del altavoz de la ESP32 (0..100), o -1 si aún no lo sabemos. */
+    private volatile int volumen = -1;
 
     public RobotWebSocketHandler(ApplicationEventPublisher eventos, EstadoWebSocketHandler estado) {
         this.eventos = eventos;
@@ -111,6 +118,11 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                 eventos.publishEvent(new AudioEsp32Recibido(session, grabacion.toByteArray()));
             }
             case "reproduccion_fin" -> estado.cambiarEstado(Estado.REPOSO, "");
+            case "hola" -> {
+                // La ESP32 se presenta al conectar y dice su volumen guardado
+                volumen = json.path("volumen").asInt(-1);
+                log.info("La ESP32 dice hola (volumen {})", volumen);
+            }
             default -> log.info("Mensaje de /ws/robot sin tipo conocido: {}", message.getPayload());
         }
     }
@@ -159,6 +171,16 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     /** Avisa a una ESP32 de que su turno ha fallado (para que vuelva a esperar). */
     public void enviarError(WebSocketSession sesion, String mensaje) {
         enviar(sesion, new TextMessage(aJson(Map.of("tipo", "error", "mensaje", mensaje))));
+    }
+
+    /** Cambia el volumen del altavoz de la ESP32 (ella lo guarda para la próxima vez). */
+    public void cambiarVolumen(int nuevo) {
+        volumen = nuevo;
+        enviarComando(Map.of("cmd", "volumen", "valor", nuevo));
+    }
+
+    public int getVolumen() {
+        return volumen;
     }
 
     /** true si hay al menos una ESP32 conectada (no cuenta las webs de pruebas). */

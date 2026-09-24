@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Cara de Bicho — en vivo</title>
+<style>
+  :root{
+    --bg:#eef0f2;
+    --panel:#ffffff;
+    --ink:#1c2024;
+    --sub:#6b7480;
+    --line:#d7dbe0;
+    --screen:#12161b;
+    --screen-line:#1f262e;
+    --eye-outer:#1c2833;
+    --eye-ring:#5ee7ff;
+    --eye-ring-glow:#5ee7ff77;
+    --eye-iris:#2c5f6e;
+    --eye-iris-hablando:#5ee7ff;
+    --eye-pupil:#070a0c;
+    --accent:#ffb454;
+    --accent-soft:#ffb45422;
+    --ok:#4caf7d;
+    --err:#ff6b6b;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#111417; --panel:#191d22; --ink:#eef0f2; --sub:#8a93a0; --line:#2a2f36;
+      --screen:#0a0d10; --screen-line:#161b20;
+      --eye-outer:#141b21; --eye-ring:#6ff0ff; --eye-ring-glow:#6ff0ff99;
+      --eye-iris:#2c5f6e; --eye-iris-hablando:#6ff0ff; --eye-pupil:#040607;
+      --accent:#ffc274; --accent-soft:#ffc27422; color-scheme: dark;
+    }
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    padding:28px 16px;
+    display:flex;
+    justify-content:center;
+  }
+  main{ width:100%; max-width:480px; display:flex; flex-direction:column; gap:16px; }
+
+  h1{ font-size:1.2rem; margin:0; }
+  p.lead{ margin:0; color:var(--sub); font-size:0.88rem; }
+
+  .conn{
+    display:inline-flex; align-items:center; gap:6px;
+    font-family: ui-monospace, monospace; font-size:0.72rem; color:var(--sub);
+  }
+  .conn .dot{ width:7px; height:7px; border-radius:50%; background:var(--err); }
+  .conn.ok .dot{ background:var(--ok); }
+
+  .device{ background:var(--panel); border:1px solid var(--line); border-radius:20px; padding:16px; }
+  .screen{
+    background:var(--screen); border:1px solid var(--screen-line); border-radius:14px;
+    padding:28px 18px; display:flex; flex-direction:column; align-items:center; gap:18px;
+    min-height:220px; justify-content:center; position:relative;
+  }
+  .status{
+    position:absolute; top:10px; left:14px;
+    font-family: ui-monospace, monospace; font-size:0.68rem; letter-spacing:.05em; text-transform:uppercase;
+    color:var(--sub); display:flex; align-items:center; gap:6px;
+  }
+  .status .dot{ width:6px; height:6px; border-radius:50%; background:var(--sub); }
+  .status.escuchando .dot{ background:var(--eye-ring); box-shadow:0 0 6px var(--eye-ring-glow); animation:pulse 1s ease-in-out infinite; }
+  .status.hablando .dot{ background:var(--accent); box-shadow:0 0 6px var(--accent-soft); animation:pulse .5s ease-in-out infinite; }
+  @keyframes pulse{ 0%,100%{opacity:1;} 50%{opacity:.35;} }
+
+  /* ---- Ojos tipo lente, tres anillos concéntricos: carcasa / iris / pupila ---- */
+  .face{ display:flex; gap:30px; }
+
+  .eye{
+    position:relative;
+    width:64px; height:64px;
+    border-radius:50%;
+    background: radial-gradient(circle at 35% 32%, #2b3742, var(--eye-outer) 65%);
+    box-shadow: 0 0 20px var(--eye-ring-glow), inset 0 0 0 2px var(--eye-ring);
+    display:flex; align-items:center; justify-content:center;
+    animation: blink 5s ease-in-out infinite;
+  }
+  .eye.right{ animation-delay:.1s; }
+
+  .eye-iris{
+    width:30px; height:30px;
+    border-radius:50%;
+    background: radial-gradient(circle at 40% 35%, var(--eye-iris), transparent 70%), var(--eye-iris);
+    box-shadow: inset 0 0 0 1px #ffffff22;
+    display:flex; align-items:center; justify-content:center;
+    transition: background .35s ease, transform .25s ease;
+  }
+  .eye-pupil{
+    width:11px; height:11px;
+    border-radius:50%;
+    background: var(--eye-pupil);
+    transition: transform .18s ease;
+  }
+
+  @keyframes blink{ 0%,92%,100%{transform:scaleY(1);} 96%{transform:scaleY(.1);} }
+
+  /* Reposo: la pupila deriva despacio, como si mirase alrededor */
+  .face.reposo .eye-pupil{ animation: mirar 6s ease-in-out infinite; }
+  .face.reposo .eye.right .eye-pupil{ animation-delay:.4s; }
+  @keyframes mirar{
+    0%, 100% { transform: translate(0,0); }
+    25%      { transform: translate(3px,-2px); }
+    50%      { transform: translate(-2px,1px); }
+    75%      { transform: translate(2px,2px); }
+  }
+
+  /* Escuchando: iris más brillante y pupila algo dilatada, atenta */
+  .face.escuchando .eye{ box-shadow: 0 0 28px var(--eye-ring-glow), inset 0 0 0 2px var(--eye-ring); }
+  .face.escuchando .eye-iris{ background: var(--eye-iris-hablando); }
+  .face.escuchando .eye-pupil{ transform: scale(1.15); }
+
+  /* Hablando: el iris "late" en vez de mover una boca */
+  .face.hablando .eye-iris{ background: var(--eye-iris-hablando); animation: latir .38s ease-in-out infinite; }
+  .face.hablando .eye-pupil{ animation: mirarRapido .5s ease-in-out infinite; }
+  @keyframes latir{
+    0%, 100% { transform: scale(1); }
+    50%      { transform: scale(1.12); }
+  }
+  @keyframes mirarRapido{
+    0%, 100% { transform: translate(0,0); }
+    50%      { transform: translate(1.5px,-1px); }
+  }
+
+  .caption{ font-family: ui-monospace, monospace; font-size:0.78rem; text-align:center; min-height:1.2em; max-width:36ch; line-height:1.4; }
+
+  .test{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; }
+  .test h2{ font-size:0.85rem; margin:0; color:var(--sub); font-weight:600; text-transform:uppercase; letter-spacing:.04em; }
+  .row{ display:flex; gap:8px; flex-wrap:wrap; }
+  button{
+    font-family:inherit; font-size:0.85rem; border-radius:10px; border:1px solid var(--line);
+    background:var(--panel); color:var(--ink); padding:8px 12px; cursor:pointer;
+  }
+  button.active{ border-color:var(--accent); color:var(--accent); background:var(--accent-soft); }
+  .say{ display:flex; gap:8px; }
+  .say input{ flex:1; font-family:inherit; font-size:0.88rem; padding:9px 10px; border-radius:10px; border:1px solid var(--line); background:var(--panel); color:var(--ink); }
+  .say button{ background:var(--accent); border-color:var(--accent); color:#1c1206; font-weight:600; white-space:nowrap; }
+  code{ font-size:0.8em; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>Cara de Bicho — en vivo</h1>
+    <p class="lead">Conectada por WebSocket a este mismo servidor Spring Boot (<code>/ws/estado</code>). Solo ojos, sin boca.</p>
+    <p class="conn" id="conn"><span class="dot"></span><span id="connLabel">conectando…</span></p>
+  </div>
+
+  <div class="device">
+    <div class="screen">
+      <div class="status reposo" id="status"><span class="dot"></span><span id="statusLabel">reposo</span></div>
+      <div class="face reposo" id="face">
+        <div class="eye left"><div class="eye-iris"><div class="eye-pupil"></div></div></div>
+        <div class="eye right"><div class="eye-iris"><div class="eye-pupil"></div></div></div>
+      </div>
+      <div class="caption" id="caption"></div>
+    </div>
+  </div>
+
+  <div class="test">
+    <h2>Panel de pruebas (mientras no hay ESP32 real conectada)</h2>
+    <div class="row">
+      <button type="button" data-state="reposo" class="active">Reposo</button>
+      <button type="button" data-state="escuchando">Escuchando</button>
+      <button type="button" data-state="hablando">Hablando</button>
+    </div>
+    <div class="say">
+      <input type="text" id="sayInput" placeholder="Texto para 'hablando'..." value="Hola Daniel, aquí estoy" />
+      <button type="button" id="sayBtn">Decir</button>
+    </div>
+    <p class="lead">Esto manda el mismo mensaje que enviaría <code>POST /api/estado</code> — cualquier pestaña que tengas abierta con esta página se actualiza a la vez.</p>
+  </div>
+</main>
+
+<script>
+(function(){
+  'use strict';
+
+  var connEl = document.getElementById('conn');
+  var connLabel = document.getElementById('connLabel');
+  var statusEl = document.getElementById('status');
+  var statusLabel = document.getElementById('statusLabel');
+  var faceEl = document.getElementById('face');
+  var captionEl = document.getElementById('caption');
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.row button'));
+  var sayInput = document.getElementById('sayInput');
+  var sayBtn = document.getElementById('sayBtn');
+
+  var labels = { reposo: 'reposo', escuchando: 'escuchando', hablando: 'hablando' };
+  var ws = null;
+
+  function applyState(estado, texto){
+    if (!labels.hasOwnProperty(estado)) estado = 'reposo';
+
+    statusEl.className = 'status ' + estado;
+    statusLabel.textContent = labels[estado];
+    faceEl.className = 'face ' + estado;
+    captionEl.textContent = estado === 'hablando' ? (texto || '') : '';
+
+    buttons.forEach(function(b){
+      b.classList.toggle('active', b.getAttribute('data-state') === estado);
+    });
+  }
+
+  function enviarEstado(estado, texto){
+    var payload = JSON.stringify({ estado: estado, texto: texto || '' });
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(payload);
+    } else {
+      fetch('/api/estado', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: payload }).catch(function(){});
+    }
+  }
+
+  function conectar(){
+    var protocolo = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    ws = new WebSocket(protocolo + location.host + '/ws/estado');
+
+    ws.onopen = function(){
+      connEl.classList.add('ok');
+      connLabel.textContent = 'conectado';
+    };
+    ws.onclose = function(){
+      connEl.classList.remove('ok');
+      connLabel.textContent = 'desconectado — reintentando…';
+      setTimeout(conectar, 2000);
+    };
+    ws.onerror = function(){
+      ws.close();
+    };
+    ws.onmessage = function(event){
+      try {
+        var msg = JSON.parse(event.data);
+        applyState(msg.estado, msg.texto);
+      } catch (e) { /* ignorar mensajes que no sean JSON válido */ }
+    };
+  }
+
+  buttons.forEach(function(b){
+    b.addEventListener('click', function(){
+      var estado = b.getAttribute('data-state');
+      enviarEstado(estado, estado === 'hablando' ? sayInput.value : '');
+    });
+  });
+
+  sayBtn.addEventListener('click', function(){
+    enviarEstado('hablando', sayInput.value);
+  });
+  sayInput.addEventListener('keydown', function(e){
+    if (e.key === 'Enter') enviarEstado('hablando', sayInput.value);
+  });
+
+  applyState('reposo', '');
+  conectar();
+})();
+</script>
+</body>
+</html>

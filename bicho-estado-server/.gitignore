@@ -1,0 +1,21 @@
+# Maven
+target/
+
+# Eclipse / STS
+bin/
+.settings/
+.classpath
+.project
+.factorypath
+
+# IntelliJ / VS Code
+.idea/
+*.iml
+.vscode/
+
+# SO
+.DS_Store
+Thumbs.db
+
+# Secretos locales
+src/main/resources/secrets.properties

@@ -8,11 +8,14 @@ package com.danipuli.bicho.model;
  * { "estado": "hablando", "texto": "Hola Daniel, aquí estoy" }
  *
  * El campo "texto" es opcional (solo tiene sentido cuando estado = hablando, como subtítulo).
+ * El campo "emocion" es opcional (neutral, contento, triste, sorprendido, enfadado, pensativo):
+ * lo pone Claude con la herramienta poner_cara.
  */
 public class EstadoMensaje {
 
     private String estado;
     private String texto;
+    private String emocion;
 
     public EstadoMensaje() {
         // constructor vacío necesario para que Jackson pueda montar el objeto desde JSON
@@ -23,8 +26,26 @@ public class EstadoMensaje {
         this.texto = texto;
     }
 
+    public EstadoMensaje(String estado, String texto, String emocion) {
+        this.estado = estado;
+        this.texto = texto;
+        this.emocion = emocion;
+    }
+
     public static EstadoMensaje de(Estado estado, String texto) {
         return new EstadoMensaje(estado.comoTexto(), texto);
+    }
+
+    public static EstadoMensaje de(Estado estado, String texto, String emocion) {
+        return new EstadoMensaje(estado.comoTexto(), texto, emocion);
+    }
+
+    public String getEmocion() {
+        return emocion;
+    }
+
+    public void setEmocion(String emocion) {
+        this.emocion = emocion;
     }
 
     public String getEstado() {

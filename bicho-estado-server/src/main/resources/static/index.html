@@ -130,6 +130,35 @@
     50%      { transform: translate(1.5px,-1px); }
   }
 
+  /* ---- Emociones (herramienta poner_cara de Claude): párpados encima del ojo ---- */
+  .eye{ overflow:hidden; --lid:var(--screen); }
+  .eye::before, .eye::after{
+    content:""; position:absolute; left:-10%; width:120%; height:0;
+    background:var(--lid); transition: height .3s ease, transform .3s ease; z-index:2;
+  }
+  .eye::before{ top:0; }
+  .eye::after{ bottom:0; border-radius:50% 50% 0 0; }
+  .face.emo-contento .eye::after{ height:42%; }
+  .face.emo-triste .eye::before{ height:38%; }
+  .face.emo-triste .eye.left::before{ transform:rotate(-14deg) translateY(-4px); }
+  .face.emo-triste .eye.right::before{ transform:rotate(14deg) translateY(-4px); }
+  .face.emo-enfadado .eye{ box-shadow: 0 0 20px #ff6b6b77, inset 0 0 0 2px var(--err); }
+  .face.emo-enfadado .eye::before{ height:40%; }
+  .face.emo-enfadado .eye.left::before{ transform:rotate(16deg) translateY(-3px); }
+  .face.emo-enfadado .eye.right::before{ transform:rotate(-16deg) translateY(-3px); }
+  .face.emo-sorprendido .eye-iris{ transform:scale(1.25); }
+  .face.emo-sorprendido .eye-pupil{ transform:scale(.6); animation:none; }
+  .face.emo-pensativo .eye-pupil{ transform:translate(-6px,-7px); animation:none; }
+  .face.emo-pensativo .eye::before{ height:22%; }
+
+  .chat{ display:flex; flex-direction:column; gap:6px; max-height:260px; overflow-y:auto; font-size:0.85rem; }
+  .chat .yo{ align-self:flex-end; background:var(--accent-soft); border:1px solid var(--accent); border-radius:12px 12px 2px 12px; padding:6px 10px; max-width:85%; }
+  .chat .bicho{ align-self:flex-start; background:var(--bg); border:1px solid var(--line); border-radius:12px 12px 12px 2px; padding:6px 10px; max-width:85%; }
+  .chat .aviso{ align-self:center; color:var(--err); font-size:0.78rem; }
+  .mic{ width:100%; padding:14px; font-weight:600; touch-action:none; user-select:none; }
+  .mic.grabando{ background:var(--err); border-color:var(--err); color:#fff; }
+  .log{ font-family: ui-monospace, monospace; font-size:0.72rem; color:var(--sub); max-height:140px; overflow-y:auto; white-space:pre-wrap; margin:0; }
+
   .caption{ font-family: ui-monospace, monospace; font-size:0.78rem; text-align:center; min-height:1.2em; max-width:36ch; line-height:1.4; }
 
   .test{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px; display:flex; flex-direction:column; gap:10px; }
@@ -166,6 +195,25 @@
   </div>
 
   <div class="test">
+    <h2>Habla con el bicho (Claude + voz de OpenAI)</h2>
+    <div class="chat" id="chat"></div>
+    <button type="button" class="mic" id="micBtn">🎤 Mantén pulsado para hablar</button>
+    <div class="say">
+      <input type="text" id="chatInput" placeholder="…o escríbele algo (ej: da una vuelta)" />
+      <button type="button" id="chatBtn">Enviar</button>
+    </div>
+    <div class="row">
+      <button type="button" id="olvidarBtn">Olvidar conversación</button>
+    </div>
+  </div>
+
+  <div class="test">
+    <h2>Comandos al robot (<code>/ws/robot</code>)</h2>
+    <p class="lead" id="robotConn">conectando…</p>
+    <pre class="log" id="robotLog"></pre>
+  </div>
+
+  <div class="test">
     <h2>Panel de pruebas (mientras no hay ESP32 real conectada)</h2>
     <div class="row">
       <button type="button" data-state="reposo" class="active">Reposo</button>
@@ -190,19 +238,22 @@
   var statusLabel = document.getElementById('statusLabel');
   var faceEl = document.getElementById('face');
   var captionEl = document.getElementById('caption');
-  var buttons = Array.prototype.slice.call(document.querySelectorAll('.row button'));
+  var buttons = Array.prototype.slice.call(document.querySelectorAll('.row button[data-state]'));
   var sayInput = document.getElementById('sayInput');
   var sayBtn = document.getElementById('sayBtn');
 
   var labels = { reposo: 'reposo', escuchando: 'escuchando', hablando: 'hablando' };
   var ws = null;
 
-  function applyState(estado, texto){
+  var emociones = ['neutral', 'contento', 'triste', 'sorprendido', 'enfadado', 'pensativo'];
+
+  function applyState(estado, texto, emocion){
     if (!labels.hasOwnProperty(estado)) estado = 'reposo';
+    if (emociones.indexOf(emocion) < 0) emocion = 'neutral';
 
     statusEl.className = 'status ' + estado;
-    statusLabel.textContent = labels[estado];
-    faceEl.className = 'face ' + estado;
+    statusLabel.textContent = labels[estado] + (emocion !== 'neutral' ? ' · ' + emocion : '');
+    faceEl.className = 'face ' + estado + ' emo-' + emocion;
     captionEl.textContent = estado === 'hablando' ? (texto || '') : '';
 
     buttons.forEach(function(b){
@@ -238,7 +289,7 @@
     ws.onmessage = function(event){
       try {
         var msg = JSON.parse(event.data);
-        applyState(msg.estado, msg.texto);
+        applyState(msg.estado, msg.texto, msg.emocion);
       } catch (e) { /* ignorar mensajes que no sean JSON válido */ }
     };
   }
@@ -257,8 +308,114 @@
     if (e.key === 'Enter') enviarEstado('hablando', sayInput.value);
   });
 
-  applyState('reposo', '');
+  // ---------------------------------------------------------------- conversar con el bicho
+  var chatEl = document.getElementById('chat');
+  var chatInput = document.getElementById('chatInput');
+  var chatBtn = document.getElementById('chatBtn');
+  var micBtn = document.getElementById('micBtn');
+  var ocupado = false;
+  var audioActual = null;
+
+  function burbuja(clase, texto){
+    var div = document.createElement('div');
+    div.className = clase;
+    div.textContent = texto;
+    chatEl.appendChild(div);
+    chatEl.scrollTop = chatEl.scrollHeight;
+  }
+
+  function mostrarRespuesta(r){
+    if (r.error) { burbuja('aviso', r.error); return; }
+    if (r.tuTexto) burbuja('yo', r.tuTexto);
+    if (r.texto) burbuja('bicho', r.texto);
+    if (r.avisoVoz) burbuja('aviso', r.avisoVoz);
+    if (r.audio) {
+      if (audioActual) audioActual.pause();
+      audioActual = new Audio('data:audio/mpeg;base64,' + r.audio);
+      audioActual.play().catch(function(){ burbuja('aviso', 'El navegador no ha dejado reproducir el audio'); });
+    }
+  }
+
+  function llamar(url, opciones){
+    if (ocupado) return;
+    ocupado = true;
+    chatBtn.disabled = true;
+    fetch(url, opciones)
+      .then(function(res){ return res.json(); })
+      .then(mostrarRespuesta)
+      .catch(function(e){ burbuja('aviso', 'Error: ' + e); })
+      .then(function(){ ocupado = false; chatBtn.disabled = false; });
+  }
+
+  function enviarTexto(){
+    var texto = chatInput.value.trim();
+    if (!texto) return;
+    chatInput.value = '';
+    llamar('/api/conversar', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ texto: texto }) });
+  }
+  chatBtn.addEventListener('click', enviarTexto);
+  chatInput.addEventListener('keydown', function(e){ if (e.key === 'Enter') enviarTexto(); });
+
+  document.getElementById('olvidarBtn').addEventListener('click', function(){
+    fetch('/api/olvidar', { method: 'POST' }).then(function(){ chatEl.innerHTML = ''; burbuja('aviso', 'Conversación olvidada'); });
+  });
+
+  // Micro: mantener pulsado para grabar, soltar para enviar
+  var grabador = null;
+  var trozos = [];
+
+  function empezarGrabacion(e){
+    e.preventDefault();
+    if (ocupado || grabador) return;
+    if (!navigator.mediaDevices || !window.MediaRecorder) { burbuja('aviso', 'Este navegador no permite grabar audio'); return; }
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(function(stream){
+      trozos = [];
+      grabador = new MediaRecorder(stream);
+      grabador.ondataavailable = function(ev){ if (ev.data.size > 0) trozos.push(ev.data); };
+      grabador.onstop = function(){
+        stream.getTracks().forEach(function(t){ t.stop(); });
+        var tipo = grabador.mimeType || 'audio/webm';
+        var ext = tipo.indexOf('ogg') >= 0 ? 'ogg' : (tipo.indexOf('mp4') >= 0 ? 'mp4' : 'webm');
+        var blob = new Blob(trozos, { type: tipo });
+        grabador = null;
+        micBtn.classList.remove('grabando');
+        micBtn.textContent = '🎤 Mantén pulsado para hablar';
+        if (blob.size < 2000) { burbuja('aviso', 'Muy corto, mantén pulsado mientras hablas'); return; }
+        var datos = new FormData();
+        datos.append('audio', blob, 'voz.' + ext);
+        llamar('/api/conversar/voz', { method: 'POST', body: datos });
+      };
+      grabador.start();
+      micBtn.classList.add('grabando');
+      micBtn.textContent = '🔴 Escuchando… suelta para enviar';
+      enviarEstado('escuchando', '');
+    }).catch(function(){ burbuja('aviso', 'No hay permiso para usar el micrófono'); });
+  }
+  function pararGrabacion(){
+    if (grabador && grabador.state === 'recording') grabador.stop();
+  }
+  micBtn.addEventListener('pointerdown', empezarGrabacion);
+  micBtn.addEventListener('pointerup', pararGrabacion);
+  micBtn.addEventListener('pointerleave', pararGrabacion);
+
+  // ---------------------------------------------------------------- comandos al robot
+  var robotLog = document.getElementById('robotLog');
+  var robotConn = document.getElementById('robotConn');
+
+  function conectarRobot(){
+    var protocolo = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    var wsRobot = new WebSocket(protocolo + location.host + '/ws/robot?cliente=web');
+    wsRobot.onopen = function(){ robotConn.textContent = 'Aquí verás lo que se le manda a la ESP32 (ruedas, etc.)'; };
+    wsRobot.onclose = function(){ robotConn.textContent = 'desconectado — reintentando…'; setTimeout(conectarRobot, 2000); };
+    wsRobot.onmessage = function(ev){
+      var hora = new Date().toLocaleTimeString();
+      robotLog.textContent = hora + '  ' + ev.data + '\n' + robotLog.textContent;
+    };
+  }
+
+  applyState('reposo', '', 'neutral');
   conectar();
+  conectarRobot();
 })();
 </script>
 </body>

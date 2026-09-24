@@ -63,6 +63,7 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
 
     private volatile Estado estadoActual = Estado.REPOSO;
     private volatile String textoActual = "";
+    private volatile String emocionActual = "neutral";
 
     // Sirve para poder ignorar un auto-reposo programado si mientras tanto llega un
     // cambio de estado más reciente.
@@ -73,7 +74,7 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
     public void afterConnectionEstablished(WebSocketSession session) {
         sesiones.add(session);
         log.info("Cliente conectado al WebSocket de estado: {} (total: {})", session.getId(), sesiones.size());
-        enviarASesion(session, EstadoMensaje.de(estadoActual, textoActual));
+        enviarASesion(session, mensajeActual());
     }
 
     @Override
@@ -102,13 +103,13 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
 
         this.estadoActual = nuevoEstado;
         this.textoActual = texto == null ? "" : texto;
-
-        EstadoMensaje mensaje = EstadoMensaje.de(estadoActual, textoActual);
-        log.info("Nuevo estado: {} ({} clientes, texto='{}')", estadoActual, sesiones.size(), textoActual);
-
-        for (WebSocketSession sesion : sesiones) {
-            enviarASesion(sesion, mensaje);
+        if (nuevoEstado == Estado.REPOSO) {
+            // Al volver a reposo la cara se relaja
+            this.emocionActual = "neutral";
         }
+
+        log.info("Nuevo estado: {} ({} clientes, texto='{}')", estadoActual, sesiones.size(), textoActual);
+        retransmitir();
 
         if (autoReposoProgramado != null) {
             autoReposoProgramado.cancel(false);
@@ -139,6 +140,30 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
         }
         long estimado = (long) texto.length() * MS_POR_CARACTER;
         return Math.max(MS_AUTO_REPOSO_MINIMO, Math.min(MS_AUTO_REPOSO_MAXIMO, estimado));
+    }
+
+    /**
+     * Cambia la emoción de la cara sin tocar el estado (la usa la herramienta poner_cara de Claude).
+     */
+    public void ponerEmocion(String emocion) {
+        this.emocionActual = emocion == null || emocion.isBlank() ? "neutral" : emocion;
+        log.info("Nueva emoción: {}", emocionActual);
+        retransmitir();
+    }
+
+    private EstadoMensaje mensajeActual() {
+        return EstadoMensaje.de(estadoActual, textoActual, emocionActual);
+    }
+
+    private void retransmitir() {
+        EstadoMensaje mensaje = mensajeActual();
+        for (WebSocketSession sesion : sesiones) {
+            enviarASesion(sesion, mensaje);
+        }
+    }
+
+    public String getEmocionActual() {
+        return emocionActual;
     }
 
     public Estado getEstadoActual() {

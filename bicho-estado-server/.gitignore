@@ -19,3 +19,6 @@ Thumbs.db
 
 # Secretos locales
 src/main/resources/secrets.properties
+
+# Configuración local de Claude Code
+.claude/

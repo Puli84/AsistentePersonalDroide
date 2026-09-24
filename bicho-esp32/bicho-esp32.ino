@@ -1,0 +1,308 @@
+/*
+ * bicho-esp32 — el cuerpo del bicho (sustituye al firmware de xiaozhi)
+ *
+ * La ESP32 no piensa: graba tu voz mientras mantienes pulsado BOOT, se la manda al
+ * servidor Spring Boot (/ws/robot), reproduce la respuesta hablada que le devuelve
+ * y mueve las ruedas cuando el servidor se lo pide.
+ *
+ * Placa: ESP32-S3 (N16R8). En Arduino IDE:
+ *   Herramientas → Placa: "ESP32S3 Dev Module"
+ *                → Flash Size: 16MB
+ *                → PSRAM: "OPI PSRAM"
+ *                → USB CDC On Boot: "Enabled"  (para ver el Monitor Serie por el USB)
+ *
+ * Librerías (Programa → Incluir librería → Administrar bibliotecas):
+ *   - "WebSockets" de Markus Sattler
+ *   - "ArduinoJson" de Benoit Blanchon (versión 7)
+ *
+ * Antes de compilar: rellena config.h (wifi e IP del servidor).
+ */
+
+#include <WiFi.h>
+#include <WebSocketsClient.h>
+#include <ArduinoJson.h>
+#include "driver/i2s_std.h"
+#include "config.h"
+
+// ---------------------------------------------------------------- pines (esquema breadboard de xiaozhi)
+// Micrófono INMP441 (L/R a GND)
+#define PIN_MIC_WS    4
+#define PIN_MIC_SCK   5
+#define PIN_MIC_SD    6
+// Amplificador MAX98357A
+#define PIN_ALT_DIN   7
+#define PIN_ALT_BCLK  15
+#define PIN_ALT_LRC   16
+// Servos de rotación continua (360°) — alimentados a 5 V aparte, GND común con la ESP32
+#define PIN_RUEDA_IZQ 17
+#define PIN_RUEDA_DER 18
+// Botón para hablar: el BOOT de la propia placa
+#define PIN_BOTON     0
+
+// ---------------------------------------------------------------- ajustes
+const int MIC_HZ = 16000;              // lo que espera el servidor
+const int ALTAVOZ_HZ = 24000;          // lo que devuelve la voz de OpenAI
+const int MUESTRAS_POR_TROZO = 512;    // 32 ms de audio por mensaje
+const int GANANCIA_MIC = 14;           // desplazamiento 32→16 bits: menor = más volumen (12..16)
+const int VOLUMEN = 70;                // volumen del altavoz, 0..100
+const unsigned long MAX_GRABACION_MS = 15000;
+const unsigned long MAX_ESPERA_RESPUESTA_MS = 30000;
+
+// Servos: pulso de parada y sentido. Si una rueda gira al revés, cambia su INVERTIR a true.
+// Si con "parar" una rueda se mueve un poco, ajusta su PARADA_US (1450..1550).
+const int PARADA_IZQ_US = 1500;
+const int PARADA_DER_US = 1500;
+const bool INVERTIR_IZQ = false;
+const bool INVERTIR_DER = false;
+const unsigned long MAX_MOVIMIENTO_MS = 3000;   // seguridad, además del límite del servidor
+
+// ---------------------------------------------------------------- estado
+enum Modo { ESPERANDO, GRABANDO, PENSANDO, HABLANDO };
+Modo modo = ESPERANDO;
+
+WebSocketsClient ws;
+bool conectado = false;
+
+i2s_chan_handle_t canalMic = nullptr;
+i2s_chan_handle_t canalAltavoz = nullptr;
+
+int32_t bufMic[MUESTRAS_POR_TROZO];
+int16_t bufEnvio[MUESTRAS_POR_TROZO];
+
+unsigned long inicioModo = 0;
+unsigned long finMovimiento = 0;   // 0 = ruedas paradas
+
+// ================================================================ audio
+
+void iniciarMicro() {
+  i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  ESP_ERROR_CHECK(i2s_new_channel(&chan, nullptr, &canalMic));
+
+  i2s_std_config_t cfg = {};
+  cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(MIC_HZ);
+  cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_MONO);
+  cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;   // INMP441 con L/R a GND
+  cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+  cfg.gpio_cfg.bclk = (gpio_num_t) PIN_MIC_SCK;
+  cfg.gpio_cfg.ws = (gpio_num_t) PIN_MIC_WS;
+  cfg.gpio_cfg.dout = I2S_GPIO_UNUSED;
+  cfg.gpio_cfg.din = (gpio_num_t) PIN_MIC_SD;
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(canalMic, &cfg));
+}
+
+void iniciarAltavoz() {
+  i2s_chan_config_t chan = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
+  chan.auto_clear = true;   // si se acaba el audio, manda silencio en vez de repetir ruido
+  ESP_ERROR_CHECK(i2s_new_channel(&chan, &canalAltavoz, nullptr));
+
+  i2s_std_config_t cfg = {};
+  cfg.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(ALTAVOZ_HZ);
+  cfg.slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+  cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;   // mismo sonido en los dos canales
+  cfg.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+  cfg.gpio_cfg.bclk = (gpio_num_t) PIN_ALT_BCLK;
+  cfg.gpio_cfg.ws = (gpio_num_t) PIN_ALT_LRC;
+  cfg.gpio_cfg.dout = (gpio_num_t) PIN_ALT_DIN;
+  cfg.gpio_cfg.din = I2S_GPIO_UNUSED;
+  ESP_ERROR_CHECK(i2s_channel_init_std_mode(canalAltavoz, &cfg));
+  ESP_ERROR_CHECK(i2s_channel_enable(canalAltavoz));
+}
+
+// Lee un trozo del micro, lo pasa a 16 bits y se lo manda al servidor
+void grabarTrozo() {
+  size_t leidos = 0;
+  if (i2s_channel_read(canalMic, bufMic, sizeof(bufMic), &leidos, pdMS_TO_TICKS(100)) != ESP_OK) {
+    return;
+  }
+  int n = leidos / sizeof(int32_t);
+  for (int i = 0; i < n; i++) {
+    int32_t s = bufMic[i] >> GANANCIA_MIC;
+    if (s > 32767) s = 32767;
+    if (s < -32768) s = -32768;
+    bufEnvio[i] = (int16_t) s;
+  }
+  ws.sendBIN((uint8_t*) bufEnvio, n * sizeof(int16_t));
+}
+
+// Reproduce un trozo de la respuesta (PCM 16 bits mono)
+void reproducir(uint8_t* datos, size_t longitud) {
+  int16_t* muestras = (int16_t*) datos;
+  size_t n = longitud / sizeof(int16_t);
+  for (size_t i = 0; i < n; i++) {
+    muestras[i] = (int16_t) ((int32_t) muestras[i] * VOLUMEN / 100);
+  }
+  size_t escritos = 0;
+  i2s_channel_write(canalAltavoz, datos, n * sizeof(int16_t), &escritos, portMAX_DELAY);
+}
+
+// ================================================================ ruedas
+
+uint32_t dutyDePulso(int us) {
+  // 50 Hz = 20000 us por periodo, resolución de 14 bits
+  return (uint32_t) ((long) us * 16383 / 20000);
+}
+
+void pararRuedas() {
+  // Sin pulsos, los servos de rotación continua se paran del todo (sin deriva)
+  ledcWrite(PIN_RUEDA_IZQ, 0);
+  ledcWrite(PIN_RUEDA_DER, 0);
+  finMovimiento = 0;
+}
+
+// sentidoIzq / sentidoDer: +1 hacia delante, -1 hacia atrás
+void moverRuedas(int sentidoIzq, int sentidoDer, int velocidad, unsigned long duracionMs) {
+  velocidad = constrain(velocidad, 0, 100);
+  duracionMs = min(duracionMs, MAX_MOVIMIENTO_MS);
+  if (velocidad == 0 || duracionMs == 0) {
+    pararRuedas();
+    return;
+  }
+  int delta = velocidad * 5;   // 100% = ±500 us sobre la parada
+  // Las ruedas van montadas en espejo: la derecha gira al revés para ir hacia delante
+  int izq = PARADA_IZQ_US + sentidoIzq * (INVERTIR_IZQ ? -delta : delta);
+  int der = PARADA_DER_US - sentidoDer * (INVERTIR_DER ? -delta : delta);
+  ledcWrite(PIN_RUEDA_IZQ, dutyDePulso(izq));
+  ledcWrite(PIN_RUEDA_DER, dutyDePulso(der));
+  finMovimiento = millis() + duracionMs;
+  if (finMovimiento == 0) finMovimiento = 1;
+}
+
+void comandoRuedas(JsonDocument& doc) {
+  String accion = doc["accion"] | "parar";
+  int velocidad = doc["velocidad"] | 50;
+  unsigned long duracion = doc["duracion_ms"] | 1000;
+  Serial.printf("Ruedas: %s vel=%d dur=%lu\n", accion.c_str(), velocidad, duracion);
+
+  if (accion == "adelante")             moverRuedas(+1, +1, velocidad, duracion);
+  else if (accion == "atras")           moverRuedas(-1, -1, velocidad, duracion);
+  else if (accion == "girar_izquierda") moverRuedas(-1, +1, velocidad, duracion);
+  else if (accion == "girar_derecha")   moverRuedas(+1, -1, velocidad, duracion);
+  else                                  pararRuedas();
+}
+
+// ================================================================ websocket
+
+void cambiarModo(Modo nuevo) {
+  modo = nuevo;
+  inicioModo = millis();
+  const char* nombres[] = { "ESPERANDO", "GRABANDO", "PENSANDO", "HABLANDO" };
+  Serial.printf("Modo: %s\n", nombres[nuevo]);
+}
+
+void alMensajeTexto(uint8_t* payload, size_t longitud) {
+  JsonDocument doc;
+  if (deserializeJson(doc, payload, longitud)) {
+    return;
+  }
+  if (doc["cmd"] == "ruedas") {
+    comandoRuedas(doc);
+    return;
+  }
+  String tipo = doc["tipo"] | "";
+  if (tipo == "audio_inicio") {
+    cambiarModo(HABLANDO);
+  } else if (tipo == "audio_fin") {
+    ws.sendTXT("{\"tipo\":\"reproduccion_fin\"}");
+    cambiarModo(ESPERANDO);
+  } else if (tipo == "error") {
+    Serial.printf("El servidor dice: %s\n", (const char*) (doc["mensaje"] | ""));
+    cambiarModo(ESPERANDO);
+  }
+}
+
+void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
+  switch (tipo) {
+    case WStype_CONNECTED:
+      conectado = true;
+      Serial.println("Conectado al servidor del bicho");
+      break;
+    case WStype_DISCONNECTED:
+      if (conectado) Serial.println("Desconectado del servidor, reintentando...");
+      conectado = false;
+      pararRuedas();   // seguridad: sin servidor, quietos
+      if (modo != ESPERANDO) cambiarModo(ESPERANDO);
+      break;
+    case WStype_TEXT:
+      alMensajeTexto(payload, longitud);
+      break;
+    case WStype_BIN:
+      if (modo == HABLANDO) reproducir(payload, longitud);
+      break;
+    default:
+      break;
+  }
+}
+
+// ================================================================ setup / loop
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  Serial.println("\n== bicho-esp32 ==");
+
+  pinMode(PIN_BOTON, INPUT_PULLUP);
+
+  ledcAttach(PIN_RUEDA_IZQ, 50, 14);
+  ledcAttach(PIN_RUEDA_DER, 50, 14);
+  pararRuedas();
+
+  iniciarMicro();
+  iniciarAltavoz();
+
+  Serial.printf("Conectando a la wifi %s", WIFI_SSID);
+  WiFi.mode(WIFI_STA);
+  WiFi.setSleep(false);   // menos cortes y menos latencia con el audio
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.printf("\nWifi OK, mi IP: %s\n", WiFi.localIP().toString().c_str());
+
+  Serial.printf("Servidor: ws://%s:%d/ws/robot\n", SERVIDOR_IP, SERVIDOR_PUERTO);
+  ws.begin(SERVIDOR_IP, SERVIDOR_PUERTO, "/ws/robot?cliente=esp32");
+  ws.onEvent(alEventoWs);
+  ws.setReconnectInterval(3000);
+  ws.enableHeartbeat(15000, 3000, 2);
+
+  Serial.println("Listo: mantén pulsado BOOT para hablar");
+}
+
+void loop() {
+  ws.loop();
+
+  // Las ruedas se paran solas al acabar cada movimiento
+  if (finMovimiento != 0 && (long) (millis() - finMovimiento) >= 0) {
+    pararRuedas();
+  }
+
+  bool botonPulsado = digitalRead(PIN_BOTON) == LOW;
+
+  switch (modo) {
+    case ESPERANDO:
+      if (botonPulsado && conectado) {
+        ws.sendTXT("{\"tipo\":\"inicio_audio\"}");
+        i2s_channel_enable(canalMic);
+        cambiarModo(GRABANDO);
+      }
+      break;
+
+    case GRABANDO:
+      grabarTrozo();
+      if (!botonPulsado || millis() - inicioModo > MAX_GRABACION_MS) {
+        i2s_channel_disable(canalMic);
+        ws.sendTXT("{\"tipo\":\"fin_audio\"}");
+        cambiarModo(PENSANDO);
+      }
+      break;
+
+    case PENSANDO:
+    case HABLANDO:
+      // Por si se pierde la respuesta, no quedarse colgado
+      if (millis() - inicioModo > MAX_ESPERA_RESPUESTA_MS) {
+        Serial.println("Sin respuesta del servidor, vuelvo a esperar");
+        cambiarModo(ESPERANDO);
+      }
+      break;
+  }
+}

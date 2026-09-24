@@ -76,7 +76,14 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         sesiones.remove(session);
         grabaciones.remove(session.getId());
-        log.info("Desconectado de /ws/robot: {} ({})", session.getId(), esEsp32(session) ? "ESP32" : "web");
+        log.info("Desconectado de /ws/robot: {} ({}) — motivo: {} {}", session.getId(),
+                esEsp32(session) ? "ESP32" : "web", status.getCode(),
+                status.getReason() == null ? "" : status.getReason());
+    }
+
+    @Override
+    public void handleTransportError(WebSocketSession session, Throwable exception) {
+        log.warn("Error de conexión en /ws/robot {}: {}", session.getId(), exception.toString());
     }
 
     @Override

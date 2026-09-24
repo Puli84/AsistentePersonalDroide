@@ -22,3 +22,7 @@ src/main/resources/secrets.properties
 
 # Configuración local de Claude Code
 .claude/
+
+# Memoria del bicho (datos personales)
+memoria.txt
+conversacion.json

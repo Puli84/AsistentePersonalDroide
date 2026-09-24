@@ -14,12 +14,20 @@ import com.anthropic.models.messages.Tool;
 import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
 import com.danipuli.bicho.ws.EstadoWebSocketHandler;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.danipuli.bicho.ws.RobotWebSocketHandler;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.NoSuchFileException;
+import java.nio.file.Path;
+import java.nio.file.StandardOpenOption;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -50,10 +58,17 @@ public class CerebroClaude {
     private static final Set<String> EMOCIONES =
             Set.of("neutral", "contento", "triste", "sorprendido", "enfadado", "pensativo");
 
-    private static final String PROMPT_SISTEMA = """
+    /** Personalidad por defecto, si no existe el fichero de personalidad. */
+    private static final String PERSONALIDAD_POR_DEFECTO = """
             Eres "el bicho", un pequeño robot mascota con ruedas y una cara en pantalla, que vive en \
             casa de Daniel. Hablas español de España, eres simpático, curioso y un poco travieso.
+            """;
 
+    /**
+     * Reglas técnicas que van siempre detrás de la personalidad (voz y cuerpo del robot).
+     * No están en el fichero de personalidad para que no se rompan al editarla.
+     */
+    private static final String REGLAS = """
             Todo lo que escribas se va a convertir en voz con un sintetizador, así que:
             - Responde en frases cortas y naturales, como en una conversación hablada (normalmente 1-3 frases).
             - Nada de markdown, listas, emojis, asteriscos ni símbolos raros.
@@ -66,9 +81,27 @@ public class CerebroClaude {
             forma clara; no hace falta en cada frase.
             - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
             - Si una herramienta te dice que no hay robot conectado, puedes contarlo de pasada.
+
+            Tu memoria:
+            - Solo recuerdas la conversación reciente. Para no olvidar algo para siempre usa la \
+            herramienta recordar.
+            - Úsala cuando te cuenten algo duradero e importante: nombres (familia, amigos, mascotas), \
+            gustos, fechas, planes, cosas de la casa, o cuando te digan "acuérdate de...".
+            - No apuntes cosas pasajeras ni lo que ya sabes. Si algo cambia, apunta el dato nuevo \
+            diciendo que corrige al anterior.
+            - Apunta cada dato como una frase corta y clara en tercera persona \
+            (por ejemplo: "La perra de Daniel se llama Luna").
+            - No hace falta que digas que lo has apuntado, salvo que te lo hayan pedido.
             """;
 
+    /** Turnos de conversación que se guardan en disco para seguir tras reiniciar. */
+    private static final int MAX_TURNOS_GUARDADOS = 15;
+
     private final AnthropicClient client;
+    private final Path ficheroPersonalidad;
+    private final Path ficheroMemoria;
+    private final Path ficheroConversacion;
+    private final ObjectMapper mapper = new ObjectMapper();
     private final String modelo;
     private final boolean configurado;
     private final EstadoWebSocketHandler estado;
@@ -78,10 +111,15 @@ public class CerebroClaude {
 
     private final List<Tool> herramientas;
     private final List<MessageParam> historial = new ArrayList<>();
+    /** Versión en texto de la conversación reciente (lo que se guarda en disco). */
+    private final List<Turno> turnos = new ArrayList<>();
 
     public CerebroClaude(@Value("${bicho.anthropic.api-key:}") String apiKey,
                          @Value("${bicho.anthropic.workspace-id:}") String workspaceId,
                          @Value("${bicho.anthropic.modelo:claude-sonnet-5}") String modelo,
+                         @Value("${bicho.personalidad.fichero:personalidad.txt}") String ficheroPersonalidad,
+                         @Value("${bicho.memoria.fichero:memoria.txt}") String ficheroMemoria,
+                         @Value("${bicho.conversacion.fichero:conversacion.json}") String ficheroConversacion,
                          @Value("${bicho.ruedas.duracion-max-ms:3000}") long duracionMaxMs,
                          @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax,
                          EstadoWebSocketHandler estado,
@@ -89,11 +127,18 @@ public class CerebroClaude {
         this.configurado = apiKey != null && !apiKey.isBlank() && !apiKey.startsWith("PON_AQUI");
         this.client = configurado ? crearCliente(apiKey, workspaceId) : null;
         this.modelo = modelo;
+        this.ficheroPersonalidad = Path.of(ficheroPersonalidad).toAbsolutePath();
+        log.info("Personalidad del bicho: {}{}", this.ficheroPersonalidad,
+                Files.exists(this.ficheroPersonalidad) ? "" : " (no existe: uso la de por defecto)");
+        this.ficheroMemoria = Path.of(ficheroMemoria).toAbsolutePath();
+        this.ficheroConversacion = Path.of(ficheroConversacion).toAbsolutePath();
+        log.info("Memoria a largo plazo: {}", this.ficheroMemoria);
         this.duracionMaxMs = duracionMaxMs;
         this.velocidadMax = velocidadMax;
         this.estado = estado;
         this.robot = robot;
-        this.herramientas = List.of(herramientaRuedas(), herramientaCara());
+        this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar());
+        cargarConversacion();
         if (!configurado) {
             log.warn("Falta la API key de Anthropic: ponla en src/main/resources/secrets.properties (bicho.anthropic.api-key)");
         }
@@ -133,12 +178,14 @@ public class CerebroClaude {
 
         StringBuilder texto = new StringBuilder();
         List<Map<String, Object>> acciones = new ArrayList<>();
+        // Se lee en cada turno: así puedes cambiar la personalidad sin reiniciar el servidor
+        String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionMemoria();
 
         for (int vuelta = 0; vuelta < MAX_VUELTAS_HERRAMIENTAS; vuelta++) {
             MessageCreateParams params = MessageCreateParams.builder()
                     .model(modelo)
                     .maxTokens(4096L)
-                    .system(PROMPT_SISTEMA)
+                    .system(promptSistema)
                     .messages(mensajes)
                     .tools(herramientas.stream().map(com.anthropic.models.messages.ToolUnion::ofTool).toList())
                     // Conversación por voz: prima la rapidez de respuesta
@@ -184,12 +231,91 @@ public class CerebroClaude {
         guardarHistorial(mensajes);
         String dicho = texto.toString().trim();
         log.info("Tú: '{}' → bicho: '{}' (acciones: {})", textoUsuario, dicho, acciones.size());
+        guardarTurno(new Turno(textoUsuario, dicho));
         return new Respuesta(dicho, acciones);
     }
 
-    /** Olvida la conversación (empezar de cero). */
+    /**
+     * Olvida la conversación reciente (empezar de cero). La memoria a largo plazo
+     * (memoria.txt) se mantiene: esa solo se toca a mano.
+     */
     public synchronized void olvidar() {
         historial.clear();
+        turnos.clear();
+        try {
+            Files.deleteIfExists(ficheroConversacion);
+        } catch (IOException ex) {
+            log.warn("No se pudo borrar {}: {}", ficheroConversacion, ex.getMessage());
+        }
+    }
+
+    // ------------------------------------------------------------------ memoria
+
+    /** Lo que el bicho recuerda para siempre, para meterlo en el prompt de sistema. */
+    private String seccionMemoria() {
+        String memoria = leerFichero(ficheroMemoria);
+        if (memoria.isEmpty()) {
+            return "";
+        }
+        return "\nLo que recuerdas de conversaciones anteriores (tu memoria a largo plazo):\n" + memoria + "\n";
+    }
+
+    private String recordar(Map<String, Object> entrada) {
+        String dato = String.valueOf(entrada.get("dato")).strip().replaceAll("\\s+", " ");
+        if (dato.isEmpty() || dato.equals("null")) {
+            return "Error: no hay nada que recordar";
+        }
+        String linea = "- " + dato;
+        try {
+            if (leerFichero(ficheroMemoria).lines().anyMatch(l -> l.strip().equalsIgnoreCase(linea))) {
+                return "Eso ya lo tenías apuntado.";
+            }
+            Files.writeString(ficheroMemoria, linea + System.lineSeparator(), StandardCharsets.UTF_8,
+                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
+            log.info("Nuevo recuerdo: {}", dato);
+            return "Apuntado en tu memoria: " + dato;
+        } catch (IOException ex) {
+            log.warn("No se pudo escribir en {}: {}", ficheroMemoria, ex.getMessage());
+            return "Error: no se ha podido guardar el recuerdo";
+        }
+    }
+
+    /**
+     * Guarda la conversación reciente en disco (solo el texto de cada turno), para
+     * poder seguirla después de reiniciar el servidor.
+     */
+    private void guardarTurno(Turno turno) {
+        turnos.add(turno);
+        while (turnos.size() > MAX_TURNOS_GUARDADOS) {
+            turnos.remove(0);
+        }
+        try {
+            mapper.writerWithDefaultPrettyPrinter().writeValue(ficheroConversacion.toFile(), turnos);
+        } catch (IOException ex) {
+            log.warn("No se pudo guardar la conversación en {}: {}", ficheroConversacion, ex.getMessage());
+        }
+    }
+
+    /** Al arrancar, recupera la conversación guardada como mensajes de texto normales. */
+    private void cargarConversacion() {
+        if (!Files.exists(ficheroConversacion)) {
+            return;
+        }
+        try {
+            List<Turno> guardados = mapper.readValue(ficheroConversacion.toFile(), new TypeReference<List<Turno>>() {
+            });
+            for (Turno t : guardados) {
+                if (t.usuario() == null || t.usuario().isBlank() || t.bicho() == null || t.bicho().isBlank()) {
+                    continue;
+                }
+                turnos.add(t);
+                historial.add(MessageParam.builder().role(MessageParam.Role.USER).content(t.usuario()).build());
+                historial.add(MessageParam.builder().role(MessageParam.Role.ASSISTANT).content(t.bicho()).build());
+            }
+            log.info("Conversación recuperada: {} turnos de {}", turnos.size(), ficheroConversacion);
+        } catch (IOException ex) {
+            log.warn("No se pudo leer la conversación guardada en {}: {}", ficheroConversacion, ex.getMessage());
+        }
     }
 
     // ------------------------------------------------------------------ herramientas
@@ -201,6 +327,7 @@ public class CerebroClaude {
         return switch (uso.name()) {
             case "mover_ruedas" -> moverRuedas(entrada, acciones);
             case "poner_cara" -> ponerCara(entrada, acciones);
+            case "recordar" -> recordar(entrada);
             default -> "Error: herramienta desconocida " + uso.name();
         };
     }
@@ -268,6 +395,24 @@ public class CerebroClaude {
                 .build();
     }
 
+    private Tool herramientaRecordar() {
+        return Tool.builder()
+                .name("recordar")
+                .description("Apunta un dato importante en tu memoria a largo plazo para no olvidarlo nunca, "
+                        + "aunque se reinicie tu cerebro. Un dato por llamada.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("dato", JsonValue.from(Map.of(
+                                        "type", "string",
+                                        "description", "El dato, como una frase corta en tercera persona")))
+                                .build())
+                        .required(List.of("dato"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
     private Tool herramientaCara() {
         return Tool.builder()
                 .name("poner_cara")
@@ -286,6 +431,23 @@ public class CerebroClaude {
     }
 
     // ------------------------------------------------------------------ utilidades
+
+    private String leerPersonalidad() {
+        String personalidad = leerFichero(ficheroPersonalidad);
+        return personalidad.isEmpty() ? PERSONALIDAD_POR_DEFECTO.strip() : personalidad;
+    }
+
+    /** Contenido de un fichero de texto, o "" si no existe o no se puede leer. */
+    private String leerFichero(Path fichero) {
+        try {
+            return Files.readString(fichero, StandardCharsets.UTF_8).strip();
+        } catch (NoSuchFileException ex) {
+            return "";
+        } catch (IOException ex) {
+            log.warn("No se pudo leer {}: {}", fichero, ex.getMessage());
+            return "";
+        }
+    }
 
     /**
      * Guarda la conversación recortando lo más antiguo. Solo se corta justo antes de un
@@ -314,6 +476,10 @@ public class CerebroClaude {
 
     private static long recortar(long valor, long min, long max) {
         return Math.max(min, Math.min(max, valor));
+    }
+
+    /** Un turno de conversación en texto, tal como se guarda en conversacion.json. */
+    public record Turno(String usuario, String bicho) {
     }
 
     /** Lo que contesta el bicho en un turno: el texto a decir y las acciones físicas que ha hecho. */

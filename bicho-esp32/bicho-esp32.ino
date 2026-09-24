@@ -69,6 +69,8 @@ i2s_chan_handle_t canalAltavoz = nullptr;
 int32_t bufMic[MUESTRAS_POR_TROZO];
 int16_t bufEnvio[MUESTRAS_POR_TROZO];
 
+bool micActivo = false;
+bool botonAntes = false;           // para detectar solo el momento de pulsar
 unsigned long inicioModo = 0;
 unsigned long finMovimiento = 0;   // 0 = ruedas paradas
 
@@ -106,6 +108,20 @@ void iniciarAltavoz() {
   cfg.gpio_cfg.din = I2S_GPIO_UNUSED;
   ESP_ERROR_CHECK(i2s_channel_init_std_mode(canalAltavoz, &cfg));
   ESP_ERROR_CHECK(i2s_channel_enable(canalAltavoz));
+}
+
+void encenderMicro() {
+  if (!micActivo) {
+    i2s_channel_enable(canalMic);
+    micActivo = true;
+  }
+}
+
+void apagarMicro() {
+  if (micActivo) {
+    i2s_channel_disable(canalMic);
+    micActivo = false;
+  }
 }
 
 // Lee un trozo del micro, lo pasa a 16 bits y se lo manda al servidor
@@ -220,6 +236,7 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
       if (conectado) Serial.println("Desconectado del servidor, reintentando...");
       conectado = false;
       pararRuedas();   // seguridad: sin servidor, quietos
+      apagarMicro();
       if (modo != ESPERANDO) cambiarModo(ESPERANDO);
       break;
     case WStype_TEXT:
@@ -231,6 +248,19 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
     default:
       break;
   }
+}
+
+// ================================================================ wifi
+
+// Muestra las redes a la vista, con el nombre entre corchetes para ver espacios de más
+void listarRedes() {
+  int n = WiFi.scanNetworks();
+  for (int i = 0; i < n; i++) {
+    Serial.printf("  [%s]  señal %d dBm  %s\n", WiFi.SSID(i).c_str(), WiFi.RSSI(i),
+                  WiFi.encryptionType(i) == WIFI_AUTH_WPA2_ENTERPRISE ? "(empresa: no compatible)" : "");
+  }
+  if (n <= 0) Serial.println("  (ninguna — la ESP32 solo ve redes de 2,4 GHz)");
+  WiFi.scanDelete();
 }
 
 // ================================================================ setup / loop
@@ -253,9 +283,18 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.setSleep(false);   // menos cortes y menos latencia con el audio
   WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  unsigned long inicioWifi = millis();
   while (WiFi.status() != WL_CONNECTED) {
     delay(500);
     Serial.print(".");
+    if (millis() - inicioWifi > 15000) {
+      Serial.printf("\nNo consigo conectar a [%s] (estado %d). Redes que veo:\n", WIFI_SSID, WiFi.status());
+      listarRedes();
+      Serial.println("Revisa WIFI_SSID y WIFI_PASSWORD en config.h. Reintentando...");
+      WiFi.disconnect();
+      WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+      inicioWifi = millis();
+    }
   }
   Serial.printf("\nWifi OK, mi IP: %s\n", WiFi.localIP().toString().c_str());
 
@@ -277,12 +316,14 @@ void loop() {
   }
 
   bool botonPulsado = digitalRead(PIN_BOTON) == LOW;
+  bool recienPulsado = botonPulsado && !botonAntes;
+  botonAntes = botonPulsado;
 
   switch (modo) {
     case ESPERANDO:
-      if (botonPulsado && conectado) {
+      if (recienPulsado && conectado) {
         ws.sendTXT("{\"tipo\":\"inicio_audio\"}");
-        i2s_channel_enable(canalMic);
+        encenderMicro();
         cambiarModo(GRABANDO);
       }
       break;
@@ -290,7 +331,7 @@ void loop() {
     case GRABANDO:
       grabarTrozo();
       if (!botonPulsado || millis() - inicioModo > MAX_GRABACION_MS) {
-        i2s_channel_disable(canalMic);
+        apagarMicro();
         ws.sendTXT("{\"tipo\":\"fin_audio\"}");
         cambiarModo(PENSANDO);
       }

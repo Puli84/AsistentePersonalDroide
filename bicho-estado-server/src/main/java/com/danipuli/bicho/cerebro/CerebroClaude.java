@@ -34,6 +34,8 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.Locale;
 import java.util.ArrayList;
+import java.util.Collections;
+import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -91,7 +93,8 @@ public class CerebroClaude {
             (lo que ya sabes, contéstalo directamente) y resume lo encontrado en una o dos frases \
             habladas, sin decir direcciones web ni fuentes salvo que te las pidan.
             - Te despiertan diciendo tu nombre y, justo después de contestar, sigues escuchando unos \
-            segundos sin que lo repitan. Cuando te pidan silencio ("cállate", "calla", "silencio"), \
+            segundos sin que lo repitan. Cuando te pidan silencio o descanso ("cállate", "calla", \
+            "silencio", "duérmete", "a dormir", "deja de escuchar", "ciérrate"), \
             se despidan ("adiós", "hasta luego", "gracias, ya está") o la conversación haya terminado \
             claramente, usa terminar_conversacion y despídete con una frase muy corta.
             - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
@@ -133,6 +136,12 @@ public class CerebroClaude {
 
     private final List<Tool> herramientas;
     private final List<MessageParam> historial = new ArrayList<>();
+    /**
+     * Los mensajes del historial con los que empieza cada turno (lo que dijo el usuario):
+     * solo se puede recortar por ahí, para no dejar herramientas a medias. Se comparan por
+     * identidad, no por contenido.
+     */
+    private final Set<MessageParam> iniciosDeTurno = Collections.newSetFromMap(new IdentityHashMap<>());
     /** Versión en texto de la conversación reciente (lo que se guarda en disco). */
     private final List<Turno> turnos = new ArrayList<>();
 
@@ -200,10 +209,8 @@ public class CerebroClaude {
         }
 
         List<MessageParam> mensajes = new ArrayList<>(historial);
-        mensajes.add(MessageParam.builder()
-                .role(MessageParam.Role.USER)
-                .content(textoUsuario)
-                .build());
+        MessageParam pregunta = mensajeDeUsuario(textoUsuario);
+        mensajes.add(pregunta);
 
         StringBuilder texto = new StringBuilder();
         List<Map<String, Object>> acciones = new ArrayList<>();
@@ -258,6 +265,7 @@ public class CerebroClaude {
             if (StopReason.REFUSAL.equals(motivo)) {
                 log.warn("Claude ha rechazado responder a: {}", textoUsuario);
                 // No guardamos este turno en el historial
+                iniciosDeTurno.remove(pregunta);
                 return new Respuesta("Uy, de eso prefiero no hablar.", acciones);
             }
             if (StopReason.TOOL_USE.equals(motivo) && !resultados.isEmpty()) {
@@ -283,6 +291,7 @@ public class CerebroClaude {
      */
     public synchronized void olvidar() {
         historial.clear();
+        iniciosDeTurno.clear();
         turnos.clear();
         try {
             Files.deleteIfExists(ficheroConversacion);
@@ -375,7 +384,7 @@ public class CerebroClaude {
                     continue;
                 }
                 turnos.add(t);
-                historial.add(MessageParam.builder().role(MessageParam.Role.USER).content(t.usuario()).build());
+                historial.add(mensajeDeUsuario(t.usuario()));
                 historial.add(MessageParam.builder().role(MessageParam.Role.ASSISTANT).content(t.bicho()).build());
             }
             log.info("Conversación recuperada: {} turnos de {}", turnos.size(), ficheroConversacion);
@@ -558,17 +567,27 @@ public class CerebroClaude {
     private void guardarHistorial(List<MessageParam> mensajes) {
         int inicio = 0;
         while (mensajes.size() - inicio > MAX_MENSAJES_HISTORIAL) {
-            inicio++;
-            while (inicio < mensajes.size() && !esTextoDeUsuario(mensajes.get(inicio))) {
-                inicio++;
+            int siguiente = inicio + 1;
+            while (siguiente < mensajes.size() && !iniciosDeTurno.contains(mensajes.get(siguiente))) {
+                siguiente++;
             }
+            if (siguiente >= mensajes.size()) {
+                break; // el último turno es muy largo (p. ej. un baile): se guarda entero
+            }
+            inicio = siguiente;
+        }
+        for (int i = 0; i < inicio; i++) {
+            iniciosDeTurno.remove(mensajes.get(i));
         }
         historial.clear();
         historial.addAll(mensajes.subList(inicio, mensajes.size()));
     }
 
-    private static boolean esTextoDeUsuario(MessageParam mensaje) {
-        return mensaje.role().equals(MessageParam.Role.USER) && mensaje.content().isString();
+    /** Crea el mensaje con lo que dice el usuario y lo apunta como principio de un turno. */
+    private MessageParam mensajeDeUsuario(String texto) {
+        MessageParam mensaje = MessageParam.builder().role(MessageParam.Role.USER).content(texto).build();
+        iniciosDeTurno.add(mensaje);
+        return mensaje;
     }
 
     private static long numero(Object valor, long porDefecto) {

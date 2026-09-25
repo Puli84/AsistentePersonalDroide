@@ -3,6 +3,7 @@ package com.danipuli.bicho.ws;
 import com.danipuli.bicho.model.Estado;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.context.ApplicationEventPublisher;
@@ -17,10 +18,16 @@ import org.springframework.web.socket.handler.AbstractWebSocketHandler;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Handler del WebSocket en /ws/robot: el canal entre el servidor y el cuerpo del bicho.
@@ -60,6 +67,9 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     /** Tamaño de cada trozo de audio que mandamos a la ESP32. */
     private static final int BYTES_POR_TROZO = 4096;
 
+    /** Cuánto audio mandamos por delante de lo que ya está sonando en la ESP32. */
+    private static final long VENTAJA_AUDIO_MS = 1000;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Set<WebSocketSession> sesiones = new CopyOnWriteArraySet<>();
     private final Map<String, ByteArrayOutputStream> grabaciones = new ConcurrentHashMap<>();
@@ -76,6 +86,19 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
 
     /** true si la respuesta en curso es una despedida (al acabarla no se sigue escuchando). */
     private volatile boolean cerrarAlAcabar = false;
+
+    /**
+     * Cola de movimientos de las ruedas: Claude pide todos los pasos de golpe (p. ej. un baile),
+     * y aquí se mandan a la ESP32 uno detrás de otro, cada uno cuando acaba el anterior.
+     */
+    private final ScheduledExecutorService colaRuedas = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "ruedas");
+        t.setDaemon(true);
+        return t;
+    });
+    private final List<ScheduledFuture<?>> movimientosPendientes = new ArrayList<>();
+    /** Cuándo acaba el último movimiento en cola (0 = ruedas paradas). */
+    private long finMovimientos = 0;
 
     public RobotWebSocketHandler(ApplicationEventPublisher eventos, EstadoWebSocketHandler estado) {
         this.eventos = eventos;
@@ -151,6 +174,16 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                 // La ESP32 se presenta al conectar y dice su volumen guardado
                 volumen = json.path("volumen").asInt(-1);
                 log.info("La ESP32 dice hola (volumen {})", volumen);
+                // Solo viene la primera vez tras encenderse: por qué se reinició la placa
+                String reinicio = json.path("reinicio").asText("");
+                switch (reinicio) {
+                    case "" -> { }
+                    case "brownout" -> log.warn("La ESP32 se ha reiniciado por FALTA DE CORRIENTE (brownout): "
+                            + "los servos o el altavoz piden más de lo que da la alimentación");
+                    case "watchdog", "fallo_programa" ->
+                            log.warn("La ESP32 se ha reiniciado por un fallo del programa ({})", reinicio);
+                    default -> log.info("La ESP32 se ha encendido (motivo: {})", reinicio);
+                }
             }
             default -> log.info("Mensaje de /ws/robot sin tipo conocido: {}", message.getPayload());
         }
@@ -186,11 +219,57 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     }
 
     /**
-     * Manda la respuesta hablada (PCM 16 bits mono) a una ESP32 concreta, en trozos.
+     * Pone un movimiento de las ruedas en cola, detrás de los que ya haya.
+     *
+     * @return milisegundos que faltan para que empiece
+     */
+    public synchronized long encolarMovimiento(Map<String, Object> comando, long duracionMs) {
+        long ahora = System.currentTimeMillis();
+        long inicio = Math.max(ahora, finMovimientos);
+        finMovimientos = inicio + duracionMs;
+        movimientosPendientes.removeIf(ScheduledFuture::isDone);
+        movimientosPendientes.add(colaRuedas.schedule(() -> enviarComando(comando), inicio - ahora,
+                TimeUnit.MILLISECONDS));
+        return inicio - ahora;
+    }
+
+    /** Anula los movimientos pendientes y, si las ruedas se están moviendo, las para ya. */
+    public synchronized void cancelarMovimientos() {
+        movimientosPendientes.forEach(f -> f.cancel(false));
+        movimientosPendientes.clear();
+        if (finMovimientos > System.currentTimeMillis()) {
+            enviarComando(Map.of("cmd", "ruedas", "accion", "parar", "velocidad", 0, "duracion_ms", 0));
+        }
+        finMovimientos = 0;
+    }
+
+    @PreDestroy
+    public void alParar() {
+        colaRuedas.shutdownNow();
+    }
+
+    /**
+     * Manda la respuesta hablada (PCM 16 bits mono) a una ESP32 concreta, en trozos, al ritmo
+     * al que se reproduce (con un poco de ventaja). Si se manda todo de golpe, se queda en cola
+     * por el camino y los mensajes de control (los ping/pong del heartbeat, comandos de ruedas)
+     * llegan con muchos segundos de retraso, y la ESP32 acaba dando la conexión por muerta.
      */
     public void enviarAudio(WebSocketSession sesion, byte[] pcm, int sampleRate) {
         enviar(sesion, new TextMessage(aJson(Map.of("tipo", "audio_inicio", "sample_rate", sampleRate))));
-        for (int i = 0; i < pcm.length; i += BYTES_POR_TROZO) {
+        long inicio = System.currentTimeMillis();
+        double bytesPorMs = sampleRate * 2 / 1000.0;
+        for (int i = 0; i < pcm.length && sesion.isOpen(); i += BYTES_POR_TROZO) {
+            // No ir más de VENTAJA_AUDIO_MS por delante de lo que ya ha sonado
+            long msDeAudioEnviado = (long) (i / bytesPorMs);
+            long espera = msDeAudioEnviado - VENTAJA_AUDIO_MS - (System.currentTimeMillis() - inicio);
+            if (espera > 0) {
+                try {
+                    Thread.sleep(espera);
+                } catch (InterruptedException ex) {
+                    Thread.currentThread().interrupt();
+                    return;
+                }
+            }
             int fin = Math.min(pcm.length, i + BYTES_POR_TROZO);
             enviar(sesion, new BinaryMessage(ByteBuffer.wrap(pcm, i, fin - i)));
         }

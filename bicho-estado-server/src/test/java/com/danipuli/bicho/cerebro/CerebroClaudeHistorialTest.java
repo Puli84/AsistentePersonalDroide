@@ -72,7 +72,7 @@ class CerebroClaudeHistorialTest {
                 carpeta.resolve("personalidad.txt").toString(),
                 carpeta.resolve("memoria.txt").toString(),
                 carpeta.resolve("conversacion.json").toString(),
-                "Atlantic/Canary", "", 3, 3000, 70, null, null);
+                "Atlantic/Canary", "", 3, 3000, 70, 20, null, null);
     }
 
     private static MessageParam asistente(String texto) {

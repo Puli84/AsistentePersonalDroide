@@ -44,15 +44,19 @@ public class ConversacionEsp32 {
     private final OpenAiVozClient voz;
     private final DetectorNombre detectorNombre;
     private final long ventanaMs;
+    /** La pista de la transcripción, normalizada, para reconocer cuando la devuelve tal cual. */
+    private final String pistaStt;
 
     public ConversacionEsp32(AsistenteService asistente, RobotWebSocketHandler robot, OpenAiVozClient voz,
                              DetectorNombre detectorNombre,
-                             @Value("${bicho.activacion.ventana-segundos:8}") long ventanaSegundos) {
+                             @Value("${bicho.activacion.ventana-segundos:8}") long ventanaSegundos,
+                             @Value("${bicho.openai.pista-stt:}") String pistaStt) {
         this.asistente = asistente;
         this.robot = robot;
         this.voz = voz;
         this.detectorNombre = detectorNombre;
         this.ventanaMs = ventanaSegundos * 1000;
+        this.pistaStt = DetectorNombre.normalizar(pistaStt);
     }
 
     @EventListener
@@ -97,6 +101,11 @@ public class ConversacionEsp32 {
             robot.enviarIgnorado(evento.sesion());
             return null;
         }
+        if (esEcoDeLaPista(texto)) {
+            log.info("La transcripción solo repite la pista (no se entendía el audio), lo ignoro: '{}'", texto);
+            robot.enviarIgnorado(evento.sesion());
+            return null;
+        }
         boolean conNombre = detectorNombre.contieneNombre(texto);
         boolean enConversacion = robot.msDesdeUltimaRespuesta() < ventanaMs;
         if (texto.isBlank() || (!conNombre && !enConversacion)) {
@@ -106,6 +115,17 @@ public class ConversacionEsp32 {
         }
         log.info("Oído {}: '{}'", conNombre ? "con su nombre" : "siguiendo la conversación", texto);
         return asistente.turnoDeTexto(texto, "pcm");
+    }
+
+    /**
+     * Cuando el audio no se entiende (ruido, un golpe...), la transcripción a veces devuelve la
+     * propia pista que le mandamos ("Hablando con RoboDragón..."), y como lleva el nombre, el robot
+     * se despertaría solo. Es eco si todo lo transcrito está dentro de la pista y es más de la
+     * mitad de ella (así un "RoboDragón" a secas sí cuenta).
+     */
+    boolean esEcoDeLaPista(String texto) {
+        String t = DetectorNombre.normalizar(texto);
+        return !t.isEmpty() && !pistaStt.isEmpty() && pistaStt.contains(t) && t.length() * 2 > pistaStt.length();
     }
 
     /**

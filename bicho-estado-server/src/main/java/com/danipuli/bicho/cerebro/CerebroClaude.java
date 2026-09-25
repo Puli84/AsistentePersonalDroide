@@ -83,7 +83,10 @@ public class CerebroClaude {
 
             Tu cuerpo:
             - Tienes dos ruedas (herramienta mover_ruedas). Úsala cuando te pidan moverte, acercarte, \
-            girar, bailar... Para bailar o hacer secuencias, llama varias veces con movimientos cortos.
+            girar, bailar... Para bailar o hacer secuencias, llama varias veces con movimientos cortos: \
+            se hacen en orden, uno detrás de otro, mientras hablas. Hay un máximo de segundos de \
+            movimiento por respuesta; si te piden más, haz lo que puedas y dilo con sinceridad, sin \
+            decir que has hecho más de lo que has hecho.
             - Tienes una cara con emociones (herramienta poner_cara). Úsala cuando tu emoción cambie de \
             forma clara; no hace falta en cada frase.
             - Tienes un altavoz (herramienta cambiar_volumen, de 0 a 100). Úsala cuando te pidan \
@@ -133,6 +136,9 @@ public class CerebroClaude {
     private final RobotWebSocketHandler robot;
     private final long duracionMaxMs;
     private final long velocidadMax;
+    private final long maxMsMovimientoTurno;
+    /** Milisegundos de movimiento que Claude ha pedido ya en el turno en curso. */
+    private long msMovimientoTurno;
 
     private final List<Tool> herramientas;
     private final List<MessageParam> historial = new ArrayList<>();
@@ -156,6 +162,7 @@ public class CerebroClaude {
                          @Value("${bicho.busqueda-web.max-por-turno:3}") long maxBusquedas,
                          @Value("${bicho.ruedas.duracion-max-ms:3000}") long duracionMaxMs,
                          @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax,
+                         @Value("${bicho.ruedas.max-segundos-por-respuesta:20}") long maxSegundosPorRespuesta,
                          EstadoWebSocketHandler estado,
                          RobotWebSocketHandler robot) {
         this.configurado = apiKey != null && !apiKey.isBlank() && !apiKey.startsWith("PON_AQUI");
@@ -172,6 +179,7 @@ public class CerebroClaude {
         log.info("Memoria a largo plazo: {}", this.ficheroMemoria);
         this.duracionMaxMs = duracionMaxMs;
         this.velocidadMax = velocidadMax;
+        this.maxMsMovimientoTurno = maxSegundosPorRespuesta * 1000;
         this.estado = estado;
         this.robot = robot;
         this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
@@ -214,6 +222,9 @@ public class CerebroClaude {
 
         StringBuilder texto = new StringBuilder();
         List<Map<String, Object>> acciones = new ArrayList<>();
+        // Lo nuevo que le digas manda: si seguía moviéndose por la orden anterior, se para
+        robot.cancelarMovimientos();
+        msMovimientoTurno = 0;
         // Se lee en cada turno: así puedes cambiar la personalidad sin reiniciar el servidor
         String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionFecha() + seccionVolumen()
                 + seccionMemoria();
@@ -425,15 +436,24 @@ public class CerebroClaude {
             duracionMs = 0;
         }
 
+        if (msMovimientoTurno + duracionMs > maxMsMovimientoTurno) {
+            return "Error: no hecho. Ya has encadenado " + msMovimientoTurno / 1000 + " s de movimiento en esta "
+                    + "respuesta y el máximo es " + maxMsMovimientoTurno / 1000 + " s. No pidas más movimientos; "
+                    + "di que has hecho ese rato y que, si quieren más, te lo vuelvan a pedir.";
+        }
+        msMovimientoTurno += duracionMs;
+
         Map<String, Object> comando = new LinkedHashMap<>();
         comando.put("cmd", "ruedas");
         comando.put("accion", accion);
         comando.put("velocidad", velocidad);
         comando.put("duracion_ms", duracionMs);
-        robot.enviarComando(comando);
+        // Los movimientos se hacen uno detrás de otro (Claude los pide todos de golpe)
+        long espera = robot.encolarMovimiento(comando, duracionMs);
         acciones.add(comando);
 
-        String hecho = "Hecho: " + accion + " a velocidad " + velocidad + " durante " + duracionMs + " ms.";
+        String hecho = "En marcha: " + accion + " a velocidad " + velocidad + " durante " + duracionMs + " ms"
+                + (espera > 0 ? ", empieza dentro de " + espera / 1000.0 + " s, cuando acaben los anteriores." : ".");
         return robot.hayRobotConectado()
                 ? hecho
                 : hecho + " (Aviso: ahora mismo no hay ninguna ESP32 conectada, así que no te has movido de verdad.)";
@@ -453,7 +473,9 @@ public class CerebroClaude {
         return Tool.builder()
                 .name("mover_ruedas")
                 .description("Mueve las dos ruedas del robot. Cada llamada es un movimiento corto que se para solo "
-                        + "al acabar la duración. Para secuencias (bailar, dar una vuelta...) haz varias llamadas.")
+                        + "al acabar la duración. Para secuencias (bailar, dar una vuelta...) haz varias llamadas: "
+                        + "se ejecutan en cola, una detrás de otra. Como mucho " + maxMsMovimientoTurno / 1000
+                        + " s de movimiento en total por respuesta.")
                 .strict(true)
                 .inputSchema(Tool.InputSchema.builder()
                         .properties(Tool.InputSchema.Properties.builder()

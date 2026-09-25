@@ -22,6 +22,7 @@
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
 #include <Preferences.h>
+#include "esp_system.h"
 #include "driver/i2s_std.h"
 #include "config.h"
 
@@ -328,6 +329,23 @@ void leerSerie() {
 
 // ================================================================ websocket
 
+// Por qué se encendió la placa la última vez (se manda al servidor en el primer "hola")
+const char* motivoReinicio() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:  return "encendido";
+    case ESP_RST_EXT:      return "boton_reset";
+    case ESP_RST_SW:       return "software";
+    case ESP_RST_USB:      return "usb";
+    case ESP_RST_PANIC:    return "fallo_programa";
+    case ESP_RST_INT_WDT:
+    case ESP_RST_TASK_WDT:
+    case ESP_RST_WDT:      return "watchdog";
+    case ESP_RST_BROWNOUT: return "brownout";
+    default:               return "otro";
+  }
+}
+bool reinicioAvisado = false;
+
 void cambiarModo(Modo nuevo) {
   modo = nuevo;
   inicioModo = millis();
@@ -379,8 +397,15 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
       conectado = true;
       Serial.println("Conectado al servidor del bicho");
       {
-        char hola[48];
-        snprintf(hola, sizeof(hola), "{\"tipo\":\"hola\",\"volumen\":%d}", volumen);
+        // La primera vez tras encenderse dice también por qué se reinició
+        char hola[96];
+        if (reinicioAvisado) {
+          snprintf(hola, sizeof(hola), "{\"tipo\":\"hola\",\"volumen\":%d}", volumen);
+        } else {
+          snprintf(hola, sizeof(hola), "{\"tipo\":\"hola\",\"volumen\":%d,\"reinicio\":\"%s\"}",
+                   volumen, motivoReinicio());
+          reinicioAvisado = true;
+        }
         ws.sendTXT(hola);
       }
       break;
@@ -394,7 +419,12 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
       alMensajeTexto(payload, longitud);
       break;
     case WStype_BIN:
-      if (modo == HABLANDO) reproducir(payload, longitud);
+      if (modo == HABLANDO) {
+        reproducir(payload, longitud);
+        // El tiempo de espera cuenta desde el último trozo, no desde el principio:
+        // si no, las respuestas largas (un cuento) se cortarían a los 30 s
+        inicioModo = millis();
+      }
       break;
     default:
       break;
@@ -421,6 +451,7 @@ void setup() {
   Serial.setTimeout(50);   // para que leer del Monitor Serie no frene el bucle
   delay(500);
   Serial.println("\n== bicho-esp32 ==");
+  Serial.printf("Motivo del reinicio: %s\n", motivoReinicio());
 
   pinMode(PIN_BOTON, INPUT_PULLUP);
 
@@ -513,7 +544,7 @@ void loop() {
 
     case PENSANDO:
     case HABLANDO:
-      // Por si se pierde la respuesta, no quedarse colgado
+      // Por si se pierde la respuesta, no quedarse colgado (hablando: 30 s sin recibir audio)
       if (millis() - inicioModo > MAX_ESPERA_RESPUESTA_MS) {
         Serial.println("Sin respuesta del servidor, vuelvo a esperar");
         cambiarModo(ESPERANDO);

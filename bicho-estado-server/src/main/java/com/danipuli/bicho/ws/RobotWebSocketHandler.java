@@ -32,8 +32,8 @@ import java.util.concurrent.CopyOnWriteArraySet;
  * Servidor → todos (texto JSON), los comandos físicos:
  *   { "cmd": "ruedas", "accion": "adelante", "velocidad": 60, "duracion_ms": 1000 }
  *
- * ESP32 → servidor, cuando hablas (botón pulsado):
- *   texto   { "tipo": "inicio_audio" }
+ * ESP32 → servidor, cuando hablas (botón pulsado, o voz oída en escucha continua):
+ *   texto   { "tipo": "inicio_audio", "modo": "boton" | "escucha" }
  *   binario PCM 16 bits, mono, 16 kHz, little-endian (varios trozos)
  *   texto   { "tipo": "fin_audio" }
  *   texto   { "tipo": "reproduccion_fin" }     ← cuando termina de decir la respuesta
@@ -47,6 +47,7 @@ import java.util.concurrent.CopyOnWriteArraySet;
  *   binario PCM 16 bits, mono, 24 kHz (varios trozos)
  *   texto   { "tipo": "audio_fin" }
  *   texto   { "tipo": "error", "mensaje": "..." }   ← si algo falla (no hay audio)
+ *   texto   { "tipo": "ignorado" }                  ← lo oído no iba para el robot (sin su nombre)
  */
 @Component
 public class RobotWebSocketHandler extends AbstractWebSocketHandler {
@@ -65,8 +66,16 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     private final ApplicationEventPublisher eventos;
     private final EstadoWebSocketHandler estado;
 
+    private final Map<String, Boolean> modosEscucha = new ConcurrentHashMap<>();
+
     /** Volumen del altavoz de la ESP32 (0..100), o -1 si aún no lo sabemos. */
     private volatile int volumen = -1;
+
+    /** Cuándo terminó de hablar el robot por última vez (para seguir sin decir su nombre). */
+    private volatile long ultimaRespuestaFin = 0;
+
+    /** true si la respuesta en curso es una despedida (al acabarla no se sigue escuchando). */
+    private volatile boolean cerrarAlAcabar = false;
 
     public RobotWebSocketHandler(ApplicationEventPublisher eventos, EstadoWebSocketHandler estado) {
         this.eventos = eventos;
@@ -83,6 +92,7 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     public void afterConnectionClosed(WebSocketSession session, CloseStatus status) {
         sesiones.remove(session);
         grabaciones.remove(session.getId());
+        modosEscucha.remove(session.getId());
         log.info("Desconectado de /ws/robot: {} ({}) — motivo: {} {}", session.getId(),
                 esEsp32(session) ? "ESP32" : "web", status.getCode(),
                 status.getReason() == null ? "" : status.getReason());
@@ -105,19 +115,38 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
         switch (json.path("tipo").asText("")) {
             case "inicio_audio" -> {
                 grabaciones.put(session.getId(), new ByteArrayOutputStream());
-                estado.cambiarEstado(Estado.ESCUCHANDO, "");
+                // "boton": has pulsado BOOT (siempre va para el robot)
+                // "escucha": la ESP32 ha oído voz ella sola (solo cuenta si dices su nombre)
+                boolean escucha = "escucha".equals(json.path("modo").asText("boton"));
+                modosEscucha.put(session.getId(), escucha);
+                if (!escucha) {
+                    estado.cambiarEstado(Estado.ESCUCHANDO, "");
+                }
             }
             case "fin_audio" -> {
                 ByteArrayOutputStream grabacion = grabaciones.remove(session.getId());
+                boolean escucha = Boolean.TRUE.equals(modosEscucha.remove(session.getId()));
                 if (grabacion == null || grabacion.size() == 0) {
-                    estado.cambiarEstado(Estado.REPOSO, "");
+                    if (!escucha) {
+                        estado.cambiarEstado(Estado.REPOSO, "");
+                    }
+                    enviarIgnorado(session);
                     return;
                 }
-                log.info("Audio recibido de la ESP32: {} bytes (~{} s)",
+                log.info("Audio recibido de la ESP32 ({}): {} bytes (~{} s)", escucha ? "escucha" : "botón",
                         grabacion.size(), grabacion.size() / 32_000.0);
-                eventos.publishEvent(new AudioEsp32Recibido(session, grabacion.toByteArray()));
+                eventos.publishEvent(new AudioEsp32Recibido(session, grabacion.toByteArray(), escucha));
             }
-            case "reproduccion_fin" -> estado.cambiarEstado(Estado.REPOSO, "");
+            case "reproduccion_fin" -> {
+                if (cerrarAlAcabar) {
+                    // Se ha despedido: hasta que no le llamen por su nombre, no escucha
+                    cerrarAlAcabar = false;
+                    ultimaRespuestaFin = 0;
+                } else {
+                    ultimaRespuestaFin = System.currentTimeMillis();
+                }
+                estado.cambiarEstado(Estado.REPOSO, "");
+            }
             case "hola" -> {
                 // La ESP32 se presenta al conectar y dice su volumen guardado
                 volumen = json.path("volumen").asInt(-1);
@@ -173,6 +202,25 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
         enviar(sesion, new TextMessage(aJson(Map.of("tipo", "error", "mensaje", mensaje))));
     }
 
+    /** Avisa a una ESP32 de que lo que ha oído no iba para el robot (vuelve a escuchar). */
+    public void enviarIgnorado(WebSocketSession sesion) {
+        enviar(sesion, new TextMessage(aJson(Map.of("tipo", "ignorado"))));
+    }
+
+    /**
+     * Cierra la conversación: cuando termine de decir la respuesta actual, ya no escuchará
+     * lo que se diga hasta que alguien diga su nombre.
+     */
+    public void terminarConversacion() {
+        cerrarAlAcabar = true;
+        ultimaRespuestaFin = 0;
+    }
+
+    /** Milisegundos desde que el robot terminó de hablar por última vez. */
+    public long msDesdeUltimaRespuesta() {
+        return ultimaRespuestaFin == 0 ? Long.MAX_VALUE : System.currentTimeMillis() - ultimaRespuestaFin;
+    }
+
     /** Cambia el volumen del altavoz de la ESP32 (ella lo guarda para la próxima vez). */
     public void cambiarVolumen(int nuevo) {
         volumen = nuevo;
@@ -217,7 +265,12 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                 && sesion.getUri().getQuery().contains("cliente=esp32");
     }
 
-    /** Evento: una ESP32 ha terminado de grabar lo que le has dicho. */
-    public record AudioEsp32Recibido(WebSocketSession sesion, byte[] pcm16k) {
+    /**
+     * Evento: una ESP32 ha terminado de grabar lo que le has dicho.
+     *
+     * @param escucha true si lo grabó ella sola al oír voz (hay que comprobar que dices su nombre);
+     *                false si has pulsado el botón
+     */
+    public record AudioEsp32Recibido(WebSocketSession sesion, byte[] pcm16k, boolean escucha) {
     }
 }

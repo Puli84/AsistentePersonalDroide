@@ -1,9 +1,11 @@
 package com.danipuli.bicho.cerebro;
 
+import com.danipuli.bicho.voz.OpenAiVozClient;
 import com.danipuli.bicho.ws.RobotWebSocketHandler;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
@@ -39,10 +41,18 @@ public class ConversacionEsp32 {
 
     private final AsistenteService asistente;
     private final RobotWebSocketHandler robot;
+    private final OpenAiVozClient voz;
+    private final DetectorNombre detectorNombre;
+    private final long ventanaMs;
 
-    public ConversacionEsp32(AsistenteService asistente, RobotWebSocketHandler robot) {
+    public ConversacionEsp32(AsistenteService asistente, RobotWebSocketHandler robot, OpenAiVozClient voz,
+                             DetectorNombre detectorNombre,
+                             @Value("${bicho.activacion.ventana-segundos:8}") long ventanaSegundos) {
         this.asistente = asistente;
         this.robot = robot;
+        this.voz = voz;
+        this.detectorNombre = detectorNombre;
+        this.ventanaMs = ventanaSegundos * 1000;
     }
 
     @EventListener
@@ -53,7 +63,12 @@ public class ConversacionEsp32 {
     private void atender(RobotWebSocketHandler.AudioEsp32Recibido evento) {
         byte[] wav = aWav(evento.pcm16k(), SAMPLE_RATE_MICRO);
         diagnosticar(evento.pcm16k(), wav);
-        AsistenteService.Resultado r = asistente.turnoDeVoz(wav, "voz.wav", "pcm");
+        AsistenteService.Resultado r = evento.escucha()
+                ? turnoDeEscucha(evento, wav)
+                : asistente.turnoDeVoz(wav, "voz.wav", "pcm");
+        if (r == null) {
+            return; // no iba para el robot: ya se ha avisado a la ESP32
+        }
         if (r.error() != null) {
             log.info("Turno de la ESP32 fallido: {}", r.error());
             robot.enviarError(evento.sesion(), r.error());
@@ -65,6 +80,32 @@ public class ConversacionEsp32 {
             return;
         }
         robot.enviarAudio(evento.sesion(), r.audio(), SAMPLE_RATE_VOZ);
+    }
+
+    /**
+     * Voz que la ESP32 ha oído ella sola: solo se contesta si dices el nombre del robot,
+     * o si acaba de hablar (para poder seguir la conversación sin repetirlo).
+     *
+     * @return el resultado del turno, o null si no iba para el robot
+     */
+    private AsistenteService.Resultado turnoDeEscucha(RobotWebSocketHandler.AudioEsp32Recibido evento, byte[] wav) {
+        String texto;
+        try {
+            texto = voz.transcribir(wav, "voz.wav");
+        } catch (Exception ex) {
+            log.warn("Fallo al transcribir la escucha: {}", ex.getMessage());
+            robot.enviarIgnorado(evento.sesion());
+            return null;
+        }
+        boolean conNombre = detectorNombre.contieneNombre(texto);
+        boolean enConversacion = robot.msDesdeUltimaRespuesta() < ventanaMs;
+        if (texto.isBlank() || (!conNombre && !enConversacion)) {
+            log.info("Oído sin nombre, lo ignoro: '{}'", texto);
+            robot.enviarIgnorado(evento.sesion());
+            return null;
+        }
+        log.info("Oído {}: '{}'", conNombre ? "con su nombre" : "siguiendo la conversación", texto);
+        return asistente.turnoDeTexto(texto, "pcm");
     }
 
     /**

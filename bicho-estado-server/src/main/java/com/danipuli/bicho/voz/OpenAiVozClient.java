@@ -40,15 +40,18 @@ public class OpenAiVozClient {
     private final String modeloStt;
     private final String modeloTts;
     private final String voz;
+    private final String pistaStt;
 
     public OpenAiVozClient(@Value("${bicho.openai.api-key:}") String apiKey,
                            @Value("${bicho.openai.modelo-stt:gpt-4o-mini-transcribe}") String modeloStt,
                            @Value("${bicho.openai.modelo-tts:gpt-4o-mini-tts}") String modeloTts,
-                           @Value("${bicho.openai.voz:coral}") String voz) {
+                           @Value("${bicho.openai.voz:coral}") String voz,
+                           @Value("${bicho.openai.pista-stt:}") String pistaStt) {
         this.apiKey = apiKey;
         this.modeloStt = modeloStt;
         this.modeloTts = modeloTts;
         this.voz = voz;
+        this.pistaStt = pistaStt;
     }
 
     public boolean configurado() {
@@ -64,6 +67,10 @@ public class OpenAiVozClient {
         ByteArrayOutputStream cuerpo = new ByteArrayOutputStream();
         escribirCampo(cuerpo, frontera, "model", modeloStt);
         escribirCampo(cuerpo, frontera, "language", "es");
+        if (pistaStt != null && !pistaStt.isBlank()) {
+            // Palabras que debe escribir bien (por ejemplo el nombre del robot)
+            escribirCampo(cuerpo, frontera, "prompt", pistaStt);
+        }
         cuerpo.write(("--" + frontera + "\r\n"
                 + "Content-Disposition: form-data; name=\"file\"; filename=\"" + nombreFichero + "\"\r\n"
                 + "Content-Type: application/octet-stream\r\n\r\n").getBytes(StandardCharsets.UTF_8));

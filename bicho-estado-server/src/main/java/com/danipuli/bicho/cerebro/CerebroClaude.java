@@ -28,6 +28,10 @@ import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
 import java.nio.file.StandardOpenOption;
+import java.time.ZoneId;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.Locale;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -60,8 +64,8 @@ public class CerebroClaude {
 
     /** Personalidad por defecto, si no existe el fichero de personalidad. */
     private static final String PERSONALIDAD_POR_DEFECTO = """
-            Eres "el bicho", un pequeño robot mascota con ruedas y una cara en pantalla, que vive en \
-            casa de Daniel. Hablas español de España, eres simpático, curioso y un poco travieso.
+            Te llamas RoboDragón: eres un pequeño robot mascota con ruedas y una cara en pantalla, que vive \
+            en casa de Daniel. Hablas español de España, eres simpático, curioso y un poco travieso.
             """;
 
     /**
@@ -81,6 +85,10 @@ public class CerebroClaude {
             forma clara; no hace falta en cada frase.
             - Tienes un altavoz (herramienta cambiar_volumen, de 0 a 100). Úsala cuando te pidan \
             hablar más alto o más bajo; si piden "sube" o "baja" sin decir cuánto, cambia unos 15 puntos.
+            - Te despiertan diciendo tu nombre y, justo después de contestar, sigues escuchando unos \
+            segundos sin que lo repitan. Cuando te pidan silencio ("cállate", "calla", "silencio"), \
+            se despidan ("adiós", "hasta luego", "gracias, ya está") o la conversación haya terminado \
+            claramente, usa terminar_conversacion y despídete con una frase muy corta.
             - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
             - Si una herramienta te dice que no hay robot conectado, puedes contarlo de pasada.
 
@@ -96,6 +104,10 @@ public class CerebroClaude {
             - No hace falta que digas que lo has apuntado, salvo que te lo hayan pedido.
             """;
 
+    /** "jueves, 25 de septiembre de 2026, 14:20" */
+    private static final DateTimeFormatter FORMATO_FECHA =
+            DateTimeFormatter.ofPattern("EEEE, d 'de' MMMM 'de' yyyy, HH:mm", new Locale("es", "ES"));
+
     /** Turnos de conversación que se guardan en disco para seguir tras reiniciar. */
     private static final int MAX_TURNOS_GUARDADOS = 15;
 
@@ -104,6 +116,7 @@ public class CerebroClaude {
     private final Path ficheroMemoria;
     private final Path ficheroConversacion;
     private final ObjectMapper mapper = new ObjectMapper();
+    private final ZoneId zonaHoraria;
     private final String modelo;
     private final boolean configurado;
     private final EstadoWebSocketHandler estado;
@@ -122,6 +135,7 @@ public class CerebroClaude {
                          @Value("${bicho.personalidad.fichero:personalidad.txt}") String ficheroPersonalidad,
                          @Value("${bicho.memoria.fichero:memoria.txt}") String ficheroMemoria,
                          @Value("${bicho.conversacion.fichero:conversacion.json}") String ficheroConversacion,
+                         @Value("${bicho.zona-horaria:Europe/Madrid}") String zonaHoraria,
                          @Value("${bicho.ruedas.duracion-max-ms:3000}") long duracionMaxMs,
                          @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax,
                          EstadoWebSocketHandler estado,
@@ -132,6 +146,7 @@ public class CerebroClaude {
         this.ficheroPersonalidad = Path.of(ficheroPersonalidad).toAbsolutePath();
         log.info("Personalidad del bicho: {}{}", this.ficheroPersonalidad,
                 Files.exists(this.ficheroPersonalidad) ? "" : " (no existe: uso la de por defecto)");
+        this.zonaHoraria = ZoneId.of(zonaHoraria);
         this.ficheroMemoria = Path.of(ficheroMemoria).toAbsolutePath();
         this.ficheroConversacion = Path.of(ficheroConversacion).toAbsolutePath();
         log.info("Memoria a largo plazo: {}", this.ficheroMemoria);
@@ -140,7 +155,7 @@ public class CerebroClaude {
         this.estado = estado;
         this.robot = robot;
         this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
-                herramientaVolumen());
+                herramientaVolumen(), herramientaTerminar());
         cargarConversacion();
         if (!configurado) {
             log.warn("Falta la API key de Anthropic: ponla en src/main/resources/secrets.properties (bicho.anthropic.api-key)");
@@ -182,7 +197,8 @@ public class CerebroClaude {
         StringBuilder texto = new StringBuilder();
         List<Map<String, Object>> acciones = new ArrayList<>();
         // Se lee en cada turno: así puedes cambiar la personalidad sin reiniciar el servidor
-        String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionVolumen() + seccionMemoria();
+        String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionFecha() + seccionVolumen()
+                + seccionMemoria();
 
         for (int vuelta = 0; vuelta < MAX_VUELTAS_HERRAMIENTAS; vuelta++) {
             MessageCreateParams params = MessageCreateParams.builder()
@@ -250,6 +266,12 @@ public class CerebroClaude {
         } catch (IOException ex) {
             log.warn("No se pudo borrar {}: {}", ficheroConversacion, ex.getMessage());
         }
+    }
+
+    /** Claude no tiene reloj: se le dice la fecha y la hora en cada turno. */
+    private String seccionFecha() {
+        String ahora = ZonedDateTime.now(zonaHoraria).format(FORMATO_FECHA);
+        return "\nAhora mismo es " + ahora + " (hora de " + zonaHoraria.getId() + ").\n";
     }
 
     private String seccionVolumen() {
@@ -348,6 +370,11 @@ public class CerebroClaude {
             case "poner_cara" -> ponerCara(entrada, acciones);
             case "recordar" -> recordar(entrada);
             case "cambiar_volumen" -> cambiarVolumen(entrada, acciones);
+            case "terminar_conversacion" -> {
+                robot.terminarConversacion();
+                acciones.add(Map.of("cmd", "terminar_conversacion"));
+                yield "Hecho: cuando acabes esta frase dejarás de escuchar hasta que te llamen por tu nombre.";
+            }
             default -> "Error: herramienta desconocida " + uso.name();
         };
     }
@@ -410,6 +437,18 @@ public class CerebroClaude {
                                                 + duracionMaxMs + ")")))
                                 .build())
                         .required(List.of("accion", "velocidad", "duracion_ms"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaTerminar() {
+        return Tool.builder()
+                .name("terminar_conversacion")
+                .description("Deja de escuchar al acabar tu respuesta, hasta que alguien diga tu nombre. "
+                        + "Úsala cuando la conversación ha terminado o te piden silencio.")
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder().build())
                         .putAdditionalProperty("additionalProperties", JsonValue.from(false))
                         .build())
                 .build();

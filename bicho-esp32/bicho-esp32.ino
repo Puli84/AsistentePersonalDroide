@@ -51,6 +51,18 @@ const int VOLUMEN_INICIAL = 80;
 const unsigned long MAX_GRABACION_MS = 15000;
 const unsigned long MAX_ESPERA_RESPUESTA_MS = 30000;
 
+// Escucha continua: la ESP32 escucha siempre y, cuando oye a alguien hablar, manda la frase
+// al servidor, que solo contesta si oye "RoboDragón". Con false, solo funciona el botón BOOT.
+// Para ajustar la sensibilidad, escribe "m" en el Monitor Serie y mira los niveles.
+const bool ESCUCHA_CONTINUA = true;
+const int UMBRAL_VOZ_MIN = 500;              // nivel mínimo para considerar que alguien habla
+const float VECES_SOBRE_RUIDO = 3.0;         // o 3 veces más fuerte que el ruido de fondo
+const int TROZOS_PARA_EMPEZAR = 3;           // ~100 ms seguidos de voz para empezar a grabar
+const unsigned long SILENCIO_FIN_MS = 900;   // silencio que marca el final de la frase
+const unsigned long MAX_FRASE_MS = 10000;
+const int TROZOS_PREVIOS = 10;               // ~320 ms de antes de detectar voz, para no cortar el "Ro..."
+const unsigned long PAUSA_TRAS_HABLAR_MS = 600;  // no escuchar justo al acabar (su propia voz)
+
 // Servos: pulso de parada y sentido. Si una rueda gira al revés, cambia su INVERTIR a true.
 // Si con "parar" una rueda se mueve un poco, ajusta su PARADA_US (1450..1550).
 const int PARADA_IZQ_US = 1500;
@@ -60,7 +72,8 @@ const bool INVERTIR_DER = false;
 const unsigned long MAX_MOVIMIENTO_MS = 3000;   // seguridad, además del límite del servidor
 
 // ---------------------------------------------------------------- estado
-enum Modo { ESPERANDO, GRABANDO, PENSANDO, HABLANDO };
+// GRABANDO = con el botón; OYENDO = grabando una frase que ha oído ella sola
+enum Modo { ESPERANDO, GRABANDO, OYENDO, PENSANDO, HABLANDO };
 Modo modo = ESPERANDO;
 
 WebSocketsClient ws;
@@ -136,18 +149,19 @@ void vaciarMicro() {
 float filtroEntradaAnterior = 0;
 float filtroSalidaAnterior = 0;
 
-void reiniciarFiltroMicro() {
-  filtroEntradaAnterior = 0;
-  filtroSalidaAnterior = 0;
-}
+int muestrasTrozo = 0;   // muestras válidas en bufEnvio
+int nivelTrozo = 0;      // volumen medio (RMS) del último trozo leído
 
-// Lee un trozo del micro, lo pasa a 16 bits y se lo manda al servidor
-void grabarTrozo() {
+// Lee un trozo del micro (32 ms), lo filtra y lo deja en bufEnvio en 16 bits
+void leerTrozoMic() {
   size_t leidos = 0;
+  muestrasTrozo = 0;
+  nivelTrozo = 0;
   if (i2s_channel_read(canalMic, bufMic, sizeof(bufMic), &leidos, pdMS_TO_TICKS(100)) != ESP_OK) {
     return;
   }
   int n = leidos / sizeof(int32_t);
+  float suma = 0;
   for (int i = 0; i < n; i++) {
     float x = (float) (bufMic[i] >> GANANCIA_MIC);
     float y = x - filtroEntradaAnterior + 0.995f * filtroSalidaAnterior;
@@ -156,8 +170,67 @@ void grabarTrozo() {
     if (y > 32767) y = 32767;
     if (y < -32768) y = -32768;
     bufEnvio[i] = (int16_t) y;
+    suma += y * y;
   }
-  ws.sendBIN((uint8_t*) bufEnvio, n * sizeof(int16_t));
+  muestrasTrozo = n;
+  nivelTrozo = n > 0 ? (int) sqrtf(suma / n) : 0;
+}
+
+void enviarTrozo(const int16_t* muestras, int n) {
+  if (n > 0) ws.sendBIN((uint8_t*) muestras, n * sizeof(int16_t));
+}
+
+// ---------------------------------------------------------------- detección de voz
+
+float ruidoFondo = 200;          // se va adaptando al ruido de la habitación
+int trozosConVoz = 0;
+unsigned long ultimaVoz = 0;
+unsigned long noEscucharHasta = 0;
+bool monitorNiveles = false;     // tecla "m" en el Monitor Serie
+
+// Los últimos trozos antes de detectar voz, para mandar también el principio de la frase
+int16_t trozosPrevios[TROZOS_PREVIOS][MUESTRAS_POR_TROZO];
+int largoPrevio[TROZOS_PREVIOS];
+int posPrevio = 0;
+
+int umbralVoz() {
+  return max(UMBRAL_VOZ_MIN, (int) (ruidoFondo * VECES_SOBRE_RUIDO));
+}
+
+void guardarTrozoPrevio() {
+  memcpy(trozosPrevios[posPrevio], bufEnvio, muestrasTrozo * sizeof(int16_t));
+  largoPrevio[posPrevio] = muestrasTrozo;
+  posPrevio = (posPrevio + 1) % TROZOS_PREVIOS;
+}
+
+void enviarTrozosPrevios() {
+  for (int i = 0; i < TROZOS_PREVIOS; i++) {
+    int p = (posPrevio + i) % TROZOS_PREVIOS;   // del más antiguo al más nuevo
+    enviarTrozo(trozosPrevios[p], largoPrevio[p]);
+    largoPrevio[p] = 0;
+  }
+}
+
+// En reposo: escucha y, si alguien empieza a hablar, empieza a mandar la frase
+void escucharEnReposo() {
+  guardarTrozoPrevio();
+  bool hayVoz = nivelTrozo > umbralVoz();
+  if (monitorNiveles) {
+    Serial.printf("nivel %5d  ruido %5d  umbral %5d %s\n", nivelTrozo, (int) ruidoFondo, umbralVoz(),
+                  hayVoz ? "<-- voz" : "");
+  }
+  if (!hayVoz) {
+    trozosConVoz = 0;
+    ruidoFondo = 0.98f * ruidoFondo + 0.02f * nivelTrozo;   // aprende el ruido de fondo
+    return;
+  }
+  if (++trozosConVoz >= TROZOS_PARA_EMPEZAR && conectado && millis() >= noEscucharHasta) {
+    trozosConVoz = 0;
+    ws.sendTXT("{\"tipo\":\"inicio_audio\",\"modo\":\"escucha\"}");
+    enviarTrozosPrevios();
+    ultimaVoz = millis();
+    cambiarModo(OYENDO);
+  }
 }
 
 // Reproduce un trozo de la respuesta (PCM 16 bits mono)
@@ -245,7 +318,11 @@ void leerSerie() {
     case 'i': Serial.println("Prueba: solo rueda izquierda"); moverRuedas(+1, 0, velocidadPrueba, dur); break;
     case 'o': Serial.println("Prueba: solo rueda derecha");   moverRuedas(0, +1, velocidadPrueba, dur); break;
     case 'x': Serial.println("Prueba: parar");             pararRuedas(); break;
-    default:  Serial.println("Teclas: w a s d (mover), i o (una rueda), x (parar), 10..100 (velocidad)");
+    case 'm':
+      monitorNiveles = !monitorNiveles;
+      Serial.printf("Monitor de niveles del micro: %s\n", monitorNiveles ? "SÍ" : "NO");
+      break;
+    default:  Serial.println("Teclas: w a s d (mover), i o (una rueda), x (parar), 10..100 (velocidad), m (niveles del micro)");
   }
 }
 
@@ -254,8 +331,16 @@ void leerSerie() {
 void cambiarModo(Modo nuevo) {
   modo = nuevo;
   inicioModo = millis();
-  const char* nombres[] = { "ESPERANDO", "GRABANDO", "PENSANDO", "HABLANDO" };
+  const char* nombres[] = { "ESPERANDO", "GRABANDO", "OYENDO", "PENSANDO", "HABLANDO" };
   Serial.printf("Modo: %s\n", nombres[nuevo]);
+}
+
+// Vuelve a reposo tirando el audio acumulado (puede llevar su propia voz del altavoz)
+void volverAEsperar() {
+  vaciarMicro();
+  trozosConVoz = 0;
+  noEscucharHasta = millis() + PAUSA_TRAS_HABLAR_MS;
+  cambiarModo(ESPERANDO);
 }
 
 void alMensajeTexto(uint8_t* payload, size_t longitud) {
@@ -278,10 +363,13 @@ void alMensajeTexto(uint8_t* payload, size_t longitud) {
     cambiarModo(HABLANDO);
   } else if (tipo == "audio_fin") {
     ws.sendTXT("{\"tipo\":\"reproduccion_fin\"}");
-    cambiarModo(ESPERANDO);
+    volverAEsperar();
+  } else if (tipo == "ignorado") {
+    // Lo que ha oído no llevaba su nombre: sigue escuchando sin decir nada
+    volverAEsperar();
   } else if (tipo == "error") {
     Serial.printf("El servidor dice: %s\n", (const char*) (doc["mensaje"] | ""));
-    cambiarModo(ESPERANDO);
+    volverAEsperar();
   }
 }
 
@@ -373,7 +461,9 @@ void setup() {
   ws.setReconnectInterval(3000);
   ws.enableHeartbeat(15000, 3000, 2);
 
-  Serial.println("Listo: mantén pulsado BOOT para hablar");
+  Serial.println(ESCUCHA_CONTINUA
+                     ? "Listo: di \"RoboDragón\" y lo que quieras, o mantén pulsado BOOT"
+                     : "Listo: mantén pulsado BOOT para hablar");
 }
 
 void loop() {
@@ -391,17 +481,31 @@ void loop() {
 
   switch (modo) {
     case ESPERANDO:
+      // Se lee el micro siempre, para que el audio esté al día y el filtro estable
+      leerTrozoMic();
       if (recienPulsado && conectado) {
-        ws.sendTXT("{\"tipo\":\"inicio_audio\"}");
-        vaciarMicro();
-        reiniciarFiltroMicro();
+        ws.sendTXT("{\"tipo\":\"inicio_audio\",\"modo\":\"boton\"}");
         cambiarModo(GRABANDO);
+      } else if (ESCUCHA_CONTINUA) {
+        escucharEnReposo();
       }
       break;
 
     case GRABANDO:
-      grabarTrozo();
+      leerTrozoMic();
+      enviarTrozo(bufEnvio, muestrasTrozo);
       if (!botonPulsado || millis() - inicioModo > MAX_GRABACION_MS) {
+        ws.sendTXT("{\"tipo\":\"fin_audio\"}");
+        cambiarModo(PENSANDO);
+      }
+      break;
+
+    case OYENDO:
+      leerTrozoMic();
+      enviarTrozo(bufEnvio, muestrasTrozo);
+      if (nivelTrozo > umbralVoz()) ultimaVoz = millis();
+      // La frase acaba cuando hay un rato de silencio (o si es demasiado larga)
+      if (millis() - ultimaVoz > SILENCIO_FIN_MS || millis() - inicioModo > MAX_FRASE_MS) {
         ws.sendTXT("{\"tipo\":\"fin_audio\"}");
         cambiarModo(PENSANDO);
       }

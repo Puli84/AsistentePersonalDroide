@@ -13,6 +13,7 @@ import com.anthropic.models.messages.StopReason;
 import com.anthropic.models.messages.Tool;
 import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
+import com.anthropic.models.messages.WebSearchTool20260209;
 import com.danipuli.bicho.ws.EstadoWebSocketHandler;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -85,6 +86,10 @@ public class CerebroClaude {
             forma clara; no hace falta en cada frase.
             - Tienes un altavoz (herramienta cambiar_volumen, de 0 a 100). Úsala cuando te pidan \
             hablar más alto o más bajo; si piden "sube" o "baja" sin decir cuánto, cambia unos 15 puntos.
+            - Puedes buscar en internet (web_search) lo que no sepas o lo que cambia con el tiempo: \
+            el tiempo que hace, noticias, resultados, horarios, precios... Úsalo solo cuando haga falta \
+            (lo que ya sabes, contéstalo directamente) y resume lo encontrado en una o dos frases \
+            habladas, sin decir direcciones web ni fuentes salvo que te las pidan.
             - Te despiertan diciendo tu nombre y, justo después de contestar, sigues escuchando unos \
             segundos sin que lo repitan. Cuando te pidan silencio ("cállate", "calla", "silencio"), \
             se despidan ("adiós", "hasta luego", "gracias, ya está") o la conversación haya terminado \
@@ -117,6 +122,8 @@ public class CerebroClaude {
     private final Path ficheroConversacion;
     private final ObjectMapper mapper = new ObjectMapper();
     private final ZoneId zonaHoraria;
+    private final String ciudad;
+    private final long maxBusquedas;
     private final String modelo;
     private final boolean configurado;
     private final EstadoWebSocketHandler estado;
@@ -135,7 +142,9 @@ public class CerebroClaude {
                          @Value("${bicho.personalidad.fichero:personalidad.txt}") String ficheroPersonalidad,
                          @Value("${bicho.memoria.fichero:memoria.txt}") String ficheroMemoria,
                          @Value("${bicho.conversacion.fichero:conversacion.json}") String ficheroConversacion,
-                         @Value("${bicho.zona-horaria:Europe/Madrid}") String zonaHoraria,
+                         @Value("${bicho.zona-horaria:Atlantic/Canary}") String zonaHoraria,
+                         @Value("${bicho.ciudad:}") String ciudad,
+                         @Value("${bicho.busqueda-web.max-por-turno:3}") long maxBusquedas,
                          @Value("${bicho.ruedas.duracion-max-ms:3000}") long duracionMaxMs,
                          @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax,
                          EstadoWebSocketHandler estado,
@@ -147,6 +156,8 @@ public class CerebroClaude {
         log.info("Personalidad del bicho: {}{}", this.ficheroPersonalidad,
                 Files.exists(this.ficheroPersonalidad) ? "" : " (no existe: uso la de por defecto)");
         this.zonaHoraria = ZoneId.of(zonaHoraria);
+        this.ciudad = ciudad == null ? "" : ciudad.trim();
+        this.maxBusquedas = maxBusquedas;
         this.ficheroMemoria = Path.of(ficheroMemoria).toAbsolutePath();
         this.ficheroConversacion = Path.of(ficheroConversacion).toAbsolutePath();
         log.info("Memoria a largo plazo: {}", this.ficheroMemoria);
@@ -207,6 +218,8 @@ public class CerebroClaude {
                     .system(promptSistema)
                     .messages(mensajes)
                     .tools(herramientas.stream().map(com.anthropic.models.messages.ToolUnion::ofTool).toList())
+                    // Búsqueda en internet (la hace Anthropic): tiempo, noticias, resultados...
+                    .addTool(WebSearchTool20260209.builder().maxUses(maxBusquedas).build())
                     // Conversación por voz: prima la rapidez de respuesta
                     .outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.LOW).build())
                     .build();
@@ -215,13 +228,13 @@ public class CerebroClaude {
             mensajes.add(respuesta.toParam());
 
             List<ContentBlockParam> resultados = new ArrayList<>();
+            // Con la búsqueda web la respuesta llega partida en varios trozos de texto (uno por
+            // cada fuente citada): se juntan tal cual, sin meter espacios entre ellos
+            StringBuilder textoMensaje = new StringBuilder();
             for (ContentBlock bloque : respuesta.content()) {
-                bloque.text().ifPresent(t -> {
-                    if (texto.length() > 0) {
-                        texto.append(' ');
-                    }
-                    texto.append(t.text().trim());
-                });
+                bloque.text().ifPresent(t -> textoMensaje.append(t.text()));
+                bloque.serverToolUse().ifPresent(uso ->
+                        log.info("Claude busca en internet: {}", uso._input()));
                 bloque.toolUse().ifPresent(uso -> {
                     String resultado = ejecutarHerramienta(uso, acciones);
                     resultados.add(ContentBlockParam.ofToolResult(ToolResultBlockParam.builder()
@@ -230,8 +243,18 @@ public class CerebroClaude {
                             .build()));
                 });
             }
+            if (!textoMensaje.toString().isBlank()) {
+                if (texto.length() > 0) {
+                    texto.append(' ');
+                }
+                texto.append(textoMensaje.toString().trim());
+            }
 
             StopReason motivo = respuesta.stopReason().orElse(null);
+            if (StopReason.PAUSE_TURN.equals(motivo)) {
+                // La búsqueda web ha hecho una pausa larga: se le deja seguir donde estaba
+                continue;
+            }
             if (StopReason.REFUSAL.equals(motivo)) {
                 log.warn("Claude ha rechazado responder a: {}", textoUsuario);
                 // No guardamos este turno en el historial
@@ -271,7 +294,9 @@ public class CerebroClaude {
     /** Claude no tiene reloj: se le dice la fecha y la hora en cada turno. */
     private String seccionFecha() {
         String ahora = ZonedDateTime.now(zonaHoraria).format(FORMATO_FECHA);
-        return "\nAhora mismo es " + ahora + " (hora de " + zonaHoraria.getId() + ").\n";
+        String donde = ciudad.isEmpty() ? "" : " Estás en " + ciudad
+                + " (úsalo si preguntan por el tiempo o cosas cercanas sin decir el sitio).";
+        return "\nAhora mismo es " + ahora + " (hora de " + zonaHoraria.getId() + ")." + donde + "\n";
     }
 
     private String seccionVolumen() {

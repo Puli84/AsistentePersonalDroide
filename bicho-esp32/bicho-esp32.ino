@@ -116,6 +116,8 @@ void iniciarAltavoz() {
   ESP_ERROR_CHECK(i2s_channel_enable(canalAltavoz));
 }
 
+// El micro se queda SIEMPRE encendido: si se le corta el reloj, el INMP441 se duerme y al
+// despertar suelta un golpe de señal durante un buen rato que no deja oír la voz.
 void encenderMicro() {
   if (!micActivo) {
     i2s_channel_enable(canalMic);
@@ -123,11 +125,20 @@ void encenderMicro() {
   }
 }
 
-void apagarMicro() {
-  if (micActivo) {
-    i2s_channel_disable(canalMic);
-    micActivo = false;
+// Tira el audio acumulado mientras no grabábamos, para empezar con sonido de ahora
+void vaciarMicro() {
+  size_t leidos = 0;
+  while (i2s_channel_read(canalMic, bufMic, sizeof(bufMic), &leidos, 0) == ESP_OK && leidos > 0) {
   }
+}
+
+// Filtro que quita el desplazamiento (DC) del micro, para que la voz quede centrada en 0
+float filtroEntradaAnterior = 0;
+float filtroSalidaAnterior = 0;
+
+void reiniciarFiltroMicro() {
+  filtroEntradaAnterior = 0;
+  filtroSalidaAnterior = 0;
 }
 
 // Lee un trozo del micro, lo pasa a 16 bits y se lo manda al servidor
@@ -138,10 +149,13 @@ void grabarTrozo() {
   }
   int n = leidos / sizeof(int32_t);
   for (int i = 0; i < n; i++) {
-    int32_t s = bufMic[i] >> GANANCIA_MIC;
-    if (s > 32767) s = 32767;
-    if (s < -32768) s = -32768;
-    bufEnvio[i] = (int16_t) s;
+    float x = (float) (bufMic[i] >> GANANCIA_MIC);
+    float y = x - filtroEntradaAnterior + 0.995f * filtroSalidaAnterior;
+    filtroEntradaAnterior = x;
+    filtroSalidaAnterior = y;
+    if (y > 32767) y = 32767;
+    if (y < -32768) y = -32768;
+    bufEnvio[i] = (int16_t) y;
   }
   ws.sendBIN((uint8_t*) bufEnvio, n * sizeof(int16_t));
 }
@@ -205,6 +219,36 @@ void comandoRuedas(JsonDocument& doc) {
   else                                  pararRuedas();
 }
 
+// Pruebas de ruedas desde el Monitor Serie (sin pasar por el servidor):
+//   w = adelante   s = atrás   a = girar izquierda   d = girar derecha   x = parar
+//   i = solo rueda izquierda hacia delante   o = solo rueda derecha hacia delante
+//   un número (10..100) = velocidad de las siguientes pruebas
+int velocidadPrueba = 50;
+
+void leerSerie() {
+  if (!Serial.available()) return;
+  String linea = Serial.readStringUntil('\n');
+  linea.trim();
+  if (linea.isEmpty()) return;
+
+  if (isDigit(linea[0])) {
+    velocidadPrueba = constrain(linea.toInt(), 10, 100);
+    Serial.printf("Velocidad de prueba: %d\n", velocidadPrueba);
+    return;
+  }
+  const unsigned long dur = 1000;
+  switch (linea[0]) {
+    case 'w': Serial.println("Prueba: adelante");          moverRuedas(+1, +1, velocidadPrueba, dur); break;
+    case 's': Serial.println("Prueba: atrás");             moverRuedas(-1, -1, velocidadPrueba, dur); break;
+    case 'a': Serial.println("Prueba: girar izquierda");   moverRuedas(-1, +1, velocidadPrueba, dur); break;
+    case 'd': Serial.println("Prueba: girar derecha");     moverRuedas(+1, -1, velocidadPrueba, dur); break;
+    case 'i': Serial.println("Prueba: solo rueda izquierda"); moverRuedas(+1, 0, velocidadPrueba, dur); break;
+    case 'o': Serial.println("Prueba: solo rueda derecha");   moverRuedas(0, +1, velocidadPrueba, dur); break;
+    case 'x': Serial.println("Prueba: parar");             pararRuedas(); break;
+    default:  Serial.println("Teclas: w a s d (mover), i o (una rueda), x (parar), 10..100 (velocidad)");
+  }
+}
+
 // ================================================================ websocket
 
 void cambiarModo(Modo nuevo) {
@@ -256,7 +300,6 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
       if (conectado) Serial.println("Desconectado del servidor, reintentando...");
       conectado = false;
       pararRuedas();   // seguridad: sin servidor, quietos
-      apagarMicro();
       if (modo != ESPERANDO) cambiarModo(ESPERANDO);
       break;
     case WStype_TEXT:
@@ -287,6 +330,7 @@ void listarRedes() {
 
 void setup() {
   Serial.begin(115200);
+  Serial.setTimeout(50);   // para que leer del Monitor Serie no frene el bucle
   delay(500);
   Serial.println("\n== bicho-esp32 ==");
 
@@ -301,6 +345,7 @@ void setup() {
   pararRuedas();
 
   iniciarMicro();
+  encenderMicro();   // y ya no se apaga
   iniciarAltavoz();
 
   Serial.printf("Conectando a la wifi %s", WIFI_SSID);
@@ -333,6 +378,7 @@ void setup() {
 
 void loop() {
   ws.loop();
+  leerSerie();
 
   // Las ruedas se paran solas al acabar cada movimiento
   if (finMovimiento != 0 && (long) (millis() - finMovimiento) >= 0) {
@@ -347,7 +393,8 @@ void loop() {
     case ESPERANDO:
       if (recienPulsado && conectado) {
         ws.sendTXT("{\"tipo\":\"inicio_audio\"}");
-        encenderMicro();
+        vaciarMicro();
+        reiniciarFiltroMicro();
         cambiarModo(GRABANDO);
       }
       break;
@@ -355,7 +402,6 @@ void loop() {
     case GRABANDO:
       grabarTrozo();
       if (!botonPulsado || millis() - inicioModo > MAX_GRABACION_MS) {
-        apagarMicro();
         ws.sendTXT("{\"tipo\":\"fin_audio\"}");
         cambiarModo(PENSANDO);
       }

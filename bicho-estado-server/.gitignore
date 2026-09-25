@@ -26,3 +26,4 @@ src/main/resources/secrets.properties
 # Memoria del bicho (datos personales)
 memoria.txt
 conversacion.json
+ultimo-audio-esp32.wav

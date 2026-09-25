@@ -7,7 +7,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.context.event.EventListener;
 import org.springframework.stereotype.Component;
 
+import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.nio.ByteOrder;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -49,6 +52,7 @@ public class ConversacionEsp32 {
 
     private void atender(RobotWebSocketHandler.AudioEsp32Recibido evento) {
         byte[] wav = aWav(evento.pcm16k(), SAMPLE_RATE_MICRO);
+        diagnosticar(evento.pcm16k(), wav);
         AsistenteService.Resultado r = asistente.turnoDeVoz(wav, "voz.wav", "pcm");
         if (r.error() != null) {
             log.info("Turno de la ESP32 fallido: {}", r.error());
@@ -61,6 +65,35 @@ public class ConversacionEsp32 {
             return;
         }
         robot.enviarAudio(evento.sesion(), r.audio(), SAMPLE_RATE_VOZ);
+    }
+
+    /**
+     * Para saber si el micro de la ESP32 oye bien: apunta en el log la duración y el nivel de
+     * la grabación, y la guarda en ultimo-audio-esp32.wav (en la carpeta del proyecto) para
+     * poder escucharla.
+     */
+    private void diagnosticar(byte[] pcm, byte[] wav) {
+        ByteBuffer b = ByteBuffer.wrap(pcm).order(ByteOrder.LITTLE_ENDIAN);
+        int muestras = pcm.length / 2;
+        int pico = 0;
+        double suma = 0;
+        for (int i = 0; i < muestras; i++) {
+            int s = b.getShort();
+            pico = Math.max(pico, Math.abs(s));
+            suma += (double) s * s;
+        }
+        double rms = muestras == 0 ? 0 : Math.sqrt(suma / muestras);
+        String valoracion = pico == 0 ? "SILENCIO TOTAL (¿micro desconectado?)"
+                : pico < 300 ? "muy bajo (sube el volumen del micro)"
+                : pico >= 32000 ? "saturado (baja el volumen del micro)"
+                : "ok";
+        log.info("Audio ESP32: {} s, pico {} de 32767, nivel medio {} → {}",
+                String.format("%.1f", muestras / (double) SAMPLE_RATE_MICRO), pico, Math.round(rms), valoracion);
+        try {
+            Files.write(Path.of("ultimo-audio-esp32.wav"), wav);
+        } catch (IOException ex) {
+            log.warn("No se pudo guardar ultimo-audio-esp32.wav: {}", ex.getMessage());
+        }
     }
 
     /** Pone la cabecera WAV delante del PCM crudo, que es lo que entiende la API de transcripción. */

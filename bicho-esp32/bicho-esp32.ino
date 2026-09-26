@@ -1,9 +1,10 @@
 /*
  * bicho-esp32 — el cuerpo del bicho (sustituye al firmware de xiaozhi)
  *
- * La ESP32 no piensa: graba tu voz mientras mantienes pulsado BOOT, se la manda al
- * servidor Spring Boot (/ws/robot), reproduce la respuesta hablada que le devuelve
- * y mueve las ruedas cuando el servidor se lo pide.
+ * La ESP32 no piensa: graba tu voz (cuando oye "RoboDragón", o mientras mantienes pulsado
+ * BOOT o la palanca del joystick), se la manda al servidor Spring Boot (/ws/robot),
+ * reproduce la respuesta hablada que le devuelve y mueve las ruedas cuando el servidor se
+ * lo pide. Con el joystick también se puede conducir a mano.
  *
  * Placa: ESP32-S3 (N16R8). En Arduino IDE:
  *   Herramientas → Placa: "ESP32S3 Dev Module"
@@ -40,12 +41,18 @@
 #define PIN_RUEDA_DER 18
 // Botón para hablar: el BOOT de la propia placa
 #define PIN_BOTON     0
+// Joystick de PS2 (alimentado a 3V3, NO a 5V): palanca para conducir, pulsarla para hablar.
+// VRx y VRy tienen que ir a pines del ADC1 (GPIO 1..10): el ADC2 no funciona con la wifi.
+// El botón puede ir en cualquier pin normal (no en el 46: la placa lo mira al arrancar).
+#define PIN_JOY_X     9
+#define PIN_JOY_Y     10
+#define PIN_JOY_SW    11
 
 // ---------------------------------------------------------------- ajustes
 const int MIC_HZ = 16000;              // lo que espera el servidor
 const int ALTAVOZ_HZ = 24000;          // lo que devuelve la voz de OpenAI
 const int MUESTRAS_POR_TROZO = 512;    // 32 ms de audio por mensaje
-const int GANANCIA_MIC = 14;           // desplazamiento 32→16 bits: menor = más volumen (12..16)
+const int GANANCIA_MIC = 15;           // desplazamiento 32→16 bits: menor = más volumen (12..16)
 // Volumen del altavoz, 0..100: 50 = la voz tal cual, 100 = el doble. Se cambia por voz
 // ("sube el volumen") y se guarda en la memoria de la placa. Este es el valor de la primera vez.
 const int VOLUMEN_INICIAL = 80;
@@ -71,6 +78,16 @@ const int PARADA_DER_US = 1500;
 const bool INVERTIR_IZQ = false;
 const bool INVERTIR_DER = false;
 const unsigned long MAX_MOVIMIENTO_MS = 3000;   // seguridad, además del límite del servidor
+
+// Joystick. Mientras lo mueves, manda él: se ignoran los movimientos que pida el servidor.
+// Para comprobar los ejes, escribe "j" en el Monitor Serie y mueve la palanca.
+// Si al empujar hacia delante va hacia atrás, cambia INVERTIR_JOY_Y; si gira al revés, INVERTIR_JOY_X.
+const bool USAR_JOYSTICK = true;
+const bool INVERTIR_JOY_X = false;
+const bool INVERTIR_JOY_Y = false;
+const int VELOCIDAD_MAX_JOYSTICK = 70;          // como el límite del servidor
+const float ZONA_MUERTA_JOY = 0.15;             // 15% alrededor del centro no hace nada
+const float GIRO_JOY = 0.7;                     // cuánto pesa girar frente a avanzar
 
 // ---------------------------------------------------------------- estado
 // GRABANDO = con el botón; OYENDO = grabando una frase que ha oído ella sola
@@ -248,6 +265,21 @@ void reproducir(uint8_t* datos, size_t longitud) {
   i2s_channel_write(canalAltavoz, datos, n * sizeof(int16_t), &escritos, portMAX_DELAY);
 }
 
+// Pitido de 1 s a 880 Hz directo al altavoz, sin servidor ni volumen guardado: para saber si
+// el amplificador y el altavoz funcionan (tecla "t" en el Monitor Serie)
+void pitidoDePrueba() {
+  Serial.println("Pitido de prueba: deberías oír un pitido de 1 segundo...");
+  static int16_t onda[240];   // 10 ms a 24 kHz
+  for (int i = 0; i < 240; i++) {
+    onda[i] = (int16_t) (8000 * sinf(2 * PI * 880 * i / (float) ALTAVOZ_HZ));
+  }
+  size_t escritos = 0;
+  for (int n = 0; n < 100; n++) {
+    i2s_channel_write(canalAltavoz, onda, sizeof(onda), &escritos, portMAX_DELAY);
+  }
+  Serial.println("Pitido terminado. Si no has oído nada, revisa el amplificador y el altavoz.");
+}
+
 // ================================================================ ruedas
 
 uint32_t dutyDePulso(int us) {
@@ -262,7 +294,16 @@ void pararRuedas() {
   finMovimiento = 0;
 }
 
-// sentidoIzq / sentidoDer: +1 hacia delante, -1 hacia atrás
+// Velocidad de cada rueda por separado, de -100 (atrás) a +100 (adelante); 0 = sin pulsos (quieta)
+void escribirRuedas(int velIzq, int velDer) {
+  int dIzq = constrain(velIzq, -100, 100) * 5;   // 100% = ±500 us sobre la parada
+  int dDer = constrain(velDer, -100, 100) * 5;
+  // Las ruedas van montadas en espejo: la derecha gira al revés para ir hacia delante
+  ledcWrite(PIN_RUEDA_IZQ, dIzq == 0 ? 0 : dutyDePulso(PARADA_IZQ_US + (INVERTIR_IZQ ? -dIzq : dIzq)));
+  ledcWrite(PIN_RUEDA_DER, dDer == 0 ? 0 : dutyDePulso(PARADA_DER_US - (INVERTIR_DER ? -dDer : dDer)));
+}
+
+// sentidoIzq / sentidoDer: +1 hacia delante, -1 hacia atrás, 0 quieta
 void moverRuedas(int sentidoIzq, int sentidoDer, int velocidad, unsigned long duracionMs) {
   velocidad = constrain(velocidad, 0, 100);
   duracionMs = min(duracionMs, MAX_MOVIMIENTO_MS);
@@ -270,20 +311,96 @@ void moverRuedas(int sentidoIzq, int sentidoDer, int velocidad, unsigned long du
     pararRuedas();
     return;
   }
-  int delta = velocidad * 5;   // 100% = ±500 us sobre la parada
-  // Las ruedas van montadas en espejo: la derecha gira al revés para ir hacia delante
-  int izq = PARADA_IZQ_US + sentidoIzq * (INVERTIR_IZQ ? -delta : delta);
-  int der = PARADA_DER_US - sentidoDer * (INVERTIR_DER ? -delta : delta);
-  ledcWrite(PIN_RUEDA_IZQ, dutyDePulso(izq));
-  ledcWrite(PIN_RUEDA_DER, dutyDePulso(der));
+  escribirRuedas(sentidoIzq * velocidad, sentidoDer * velocidad);
   finMovimiento = millis() + duracionMs;
   if (finMovimiento == 0) finMovimiento = 1;
+}
+
+// ---------------------------------------------------------------- joystick
+
+bool joystickListo = false;      // conectado y calibrado al arrancar
+bool conduciendo = false;        // la palanca está fuera del centro
+int centroJoyX = 2048;
+int centroJoyY = 2048;
+unsigned long ultimaLecturaJoy = 0;
+bool mostrarJoystick = false;    // tecla "j" en el Monitor Serie
+
+// Al arrancar (sin tocar la palanca) apunta dónde está el centro. Si los valores son raros,
+// seguramente no está conectado: se desactiva para que el robot no se mueva solo.
+void calibrarJoystick() {
+  if (!USAR_JOYSTICK) return;
+  pinMode(PIN_JOY_SW, INPUT_PULLUP);
+  long sumaX = 0, sumaY = 0;
+  int minX = 4095, maxX = 0;
+  for (int i = 0; i < 32; i++) {
+    int x = analogRead(PIN_JOY_X);
+    int y = analogRead(PIN_JOY_Y);
+    sumaX += x;
+    sumaY += y;
+    minX = min(minX, x);
+    maxX = max(maxX, x);
+    delay(2);
+  }
+  centroJoyX = sumaX / 32;
+  centroJoyY = sumaY / 32;
+  bool centrado = centroJoyX > 1000 && centroJoyX < 3100 && centroJoyY > 1000 && centroJoyY < 3100;
+  bool estable = maxX - minX < 400;   // un pin al aire da valores que bailan mucho
+  joystickListo = centrado && estable;
+  if (joystickListo) {
+    Serial.printf("Joystick listo (centro x=%d y=%d)\n", centroJoyX, centroJoyY);
+  } else {
+    Serial.printf("Joystick desactivado: no parece conectado (x=%d y=%d, variación %d). "
+                  "Revisa los cables y que no tocabas la palanca al arrancar.\n",
+                  centroJoyX, centroJoyY, maxX - minX);
+  }
+}
+
+// Posición de un eje de -1 a +1, con la zona muerta del centro quitada
+float ejeJoystick(int pin, int centro, bool invertir) {
+  int bruto = analogRead(pin);
+  float v = bruto >= centro ? (float) (bruto - centro) / (4095 - centro)
+                            : (float) (bruto - centro) / centro;
+  if (invertir) v = -v;
+  if (fabsf(v) < ZONA_MUERTA_JOY) return 0;
+  // Para que justo al salir de la zona muerta empiece suave, desde 0
+  return (v > 0 ? v - ZONA_MUERTA_JOY : v + ZONA_MUERTA_JOY) / (1 - ZONA_MUERTA_JOY);
+}
+
+// Conducir con la palanca: delante/detrás avanza, izquierda/derecha gira (se pueden mezclar)
+void leerJoystick() {
+  if (!joystickListo || millis() - ultimaLecturaJoy < 30) return;
+  ultimaLecturaJoy = millis();
+
+  float giro = ejeJoystick(PIN_JOY_X, centroJoyX, INVERTIR_JOY_X);
+  // En estos módulos, empujar hacia delante suele bajar el valor de Y
+  float avance = -ejeJoystick(PIN_JOY_Y, centroJoyY, INVERTIR_JOY_Y);
+  if (mostrarJoystick) {
+    Serial.printf("joystick: avance %+.2f  giro %+.2f  boton %s\n", avance, giro,
+                  digitalRead(PIN_JOY_SW) == LOW ? "PULSADO" : "-");
+  }
+
+  if (avance == 0 && giro == 0) {
+    if (conduciendo) {
+      conduciendo = false;
+      pararRuedas();
+    }
+    return;
+  }
+  conduciendo = true;
+  finMovimiento = 0;   // anula el movimiento que estuviera haciendo por orden del servidor
+  float izq = constrain(avance + giro * GIRO_JOY, -1.0f, 1.0f);
+  float der = constrain(avance - giro * GIRO_JOY, -1.0f, 1.0f);
+  escribirRuedas((int) (izq * VELOCIDAD_MAX_JOYSTICK), (int) (der * VELOCIDAD_MAX_JOYSTICK));
 }
 
 void comandoRuedas(JsonDocument& doc) {
   String accion = doc["accion"] | "parar";
   int velocidad = doc["velocidad"] | 50;
   unsigned long duracion = doc["duracion_ms"] | 1000;
+  if (conduciendo) {
+    Serial.printf("Ruedas: %s ignorado (estás conduciendo con el joystick)\n", accion.c_str());
+    return;
+  }
   Serial.printf("Ruedas: %s vel=%d dur=%lu\n", accion.c_str(), velocidad, duracion);
 
   if (accion == "adelante")             moverRuedas(+1, +1, velocidad, duracion);
@@ -323,7 +440,16 @@ void leerSerie() {
       monitorNiveles = !monitorNiveles;
       Serial.printf("Monitor de niveles del micro: %s\n", monitorNiveles ? "SÍ" : "NO");
       break;
-    default:  Serial.println("Teclas: w a s d (mover), i o (una rueda), x (parar), 10..100 (velocidad), m (niveles del micro)");
+    case 't':
+      pitidoDePrueba();
+      break;
+    case 'j':
+      mostrarJoystick = !mostrarJoystick;
+      Serial.printf("Ver el joystick: %s%s\n", mostrarJoystick ? "SÍ" : "NO",
+                    joystickListo ? "" : " (ojo: está desactivado, mira el mensaje del arranque)");
+      break;
+    default:  Serial.println("Teclas: w a s d (mover), i o (una rueda), x (parar), 10..100 (velocidad), "
+                             "m (niveles del micro), j (ver el joystick), t (pitido de prueba)");
   }
 }
 
@@ -462,6 +588,7 @@ void setup() {
   ledcAttach(PIN_RUEDA_IZQ, 50, 14);
   ledcAttach(PIN_RUEDA_DER, 50, 14);
   pararRuedas();
+  calibrarJoystick();   // no toques la palanca mientras arranca
 
   iniciarMicro();
   encenderMicro();   // y ya no se apaga
@@ -505,8 +632,11 @@ void loop() {
   if (finMovimiento != 0 && (long) (millis() - finMovimiento) >= 0) {
     pararRuedas();
   }
+  leerJoystick();
 
-  bool botonPulsado = digitalRead(PIN_BOTON) == LOW;
+  // Para hablar vale el BOOT o apretar la palanca del joystick
+  bool botonPulsado = digitalRead(PIN_BOTON) == LOW
+                      || (joystickListo && digitalRead(PIN_JOY_SW) == LOW);
   bool recienPulsado = botonPulsado && !botonAntes;
   botonAntes = botonPulsado;
 

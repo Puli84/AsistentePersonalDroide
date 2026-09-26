@@ -19,6 +19,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -48,11 +49,13 @@ public class OpenAiVozClient {
 
     private final ObjectMapper mapper = new ObjectMapper();
     /**
-     * Cuánto esperamos a OpenAI en cada intento (petición entera). Normalmente tarda 1-3 s, pero
-     * a veces se atasca más de un minuto: es mejor reintentar que dejar a la ESP32 esperando
-     * (ella se rinde a los 30 s, y dos intentos de 10 s más Claude caben en ese tiempo).
+     * Espera antes de lanzar otra petición igual si OpenAI no ha contestado (lo normal es ~1 s;
+     * un trozo largo de voz, 3-4 s). Ver {@link #enviar}.
      */
-    private static final Duration TIMEOUT_PETICION = Duration.ofSeconds(10);
+    private static final long MS_ANTES_DE_OTRO_INTENTO = 4000;
+    private static final int MAX_INTENTOS = 3;
+    /** Lo máximo que se espera a OpenAI en total (la ESP32 se rinde a los 30 s). */
+    private static final Duration TIMEOUT_TOTAL = Duration.ofSeconds(15);
 
     /** Tamaño de cada trozo de texto al generar la voz (unos 20 s de voz como mucho). */
     static final int MAX_CARACTERES_TROZO = 300;
@@ -112,7 +115,7 @@ public class OpenAiVozClient {
         cuerpo.write(("\r\n--" + frontera + "--\r\n").getBytes(StandardCharsets.UTF_8));
 
         HttpRequest peticion = HttpRequest.newBuilder(URI.create(URL_TRANSCRIPCION))
-                .timeout(TIMEOUT_PETICION)
+                .timeout(TIMEOUT_TOTAL)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "multipart/form-data; boundary=" + frontera)
                 .POST(HttpRequest.BodyPublishers.ofByteArray(cuerpo.toByteArray()))
@@ -195,7 +198,7 @@ public class OpenAiVozClient {
                 "response_format", formato));
 
         HttpRequest peticion = HttpRequest.newBuilder(URI.create(URL_VOZ))
-                .timeout(TIMEOUT_PETICION)
+                .timeout(TIMEOUT_TOTAL)
                 .header("Authorization", "Bearer " + apiKey)
                 .header("Content-Type", "application/json")
                 .POST(HttpRequest.BodyPublishers.ofString(json, StandardCharsets.UTF_8))
@@ -209,40 +212,85 @@ public class OpenAiVozClient {
     }
 
     /**
-     * Manda la petición y, si se cuelga, se corta la conexión o OpenAI dice que está saturado
-     * (errores 5xx, p. ej. 503 "Please retry"), lo intenta una vez más.
+     * Manda la petición a OpenAI sin quedarse colgado.
+     *
+     * OpenAI deja sin contestar más o menos una de cada seis peticiones (ni un byte en 30 s),
+     * cuando lo normal es que responda en ~1 s. Así que si en MS_ANTES_DE_OTRO_INTENTO no ha
+     * llegado la respuesta, se lanza otra petición igual sin cancelar la primera, y se usa la
+     * que llegue antes. Si una falla (se corta, o error 5xx como el 503 "Please retry"), se
+     * lanza otra en el acto. Como mucho MAX_INTENTOS y TIMEOUT_TOTAL en total (el límite cuenta
+     * la respuesta entera, audio incluido, no solo las cabeceras).
      */
     private <T> HttpResponse<T> enviar(HttpRequest peticion, HttpResponse.BodyHandler<T> lector)
             throws IOException, InterruptedException {
-        HttpResponse<T> respuesta;
+        Intentos<T> intentos = new Intentos<>(peticion, lector);
+        intentos.lanzar();
+        long fin = System.currentTimeMillis() + TIMEOUT_TOTAL.toMillis();
         try {
-            respuesta = enviarConLimite(peticion, lector);
-        } catch (IOException ex) {
-            log.warn("OpenAI no ha respondido ({}), reintento", ex.toString());
-            return enviarConLimite(peticion, lector);
-        }
-        if (respuesta.statusCode() >= 500) {
-            log.warn("OpenAI ha respondido {}, reintento", respuesta.statusCode());
-            return enviarConLimite(peticion, lector);
-        }
-        return respuesta;
-    }
-
-    /**
-     * El timeout de HttpRequest solo cuenta hasta que llegan las cabeceras: si OpenAI empieza a
-     * responder y luego se atasca a mitad del audio, se quedaría esperando para siempre. Aquí
-     * se limita la petición entera, cuerpo incluido.
-     */
-    private <T> HttpResponse<T> enviarConLimite(HttpRequest peticion, HttpResponse.BodyHandler<T> lector)
-            throws IOException, InterruptedException {
-        CompletableFuture<HttpResponse<T>> futura = http.sendAsync(peticion, lector);
-        try {
-            return futura.get(TIMEOUT_PETICION.toMillis(), TimeUnit.MILLISECONDS);
-        } catch (TimeoutException ex) {
-            futura.cancel(true);
-            throw new IOException("sin respuesta completa en " + TIMEOUT_PETICION.toSeconds() + " s");
+            while (true) {
+                long queda = fin - System.currentTimeMillis();
+                if (queda <= 0) {
+                    throw new IOException("OpenAI no ha respondido en " + TIMEOUT_TOTAL.toSeconds() + " s");
+                }
+                try {
+                    return intentos.ganador.get(Math.min(MS_ANTES_DE_OTRO_INTENTO, queda), TimeUnit.MILLISECONDS);
+                } catch (TimeoutException ex) {
+                    if (intentos.lanzar()) {
+                        log.warn("OpenAI tarda más de lo normal: lanzo otra petición igual y uso la primera que llegue");
+                    }
+                }
+            }
         } catch (ExecutionException ex) {
             throw ex.getCause() instanceof IOException io ? io : new IOException(ex.getCause());
+        } finally {
+            intentos.cancelarTodos();
+        }
+    }
+
+    /** Las peticiones iguales lanzadas para una misma llamada; gana la primera que va bien. */
+    private final class Intentos<T> {
+
+        final CompletableFuture<HttpResponse<T>> ganador = new CompletableFuture<>();
+        private final List<CompletableFuture<HttpResponse<T>>> lanzados = new ArrayList<>();
+        private final HttpRequest peticion;
+        private final HttpResponse.BodyHandler<T> lector;
+        private int fallidos;
+
+        Intentos(HttpRequest peticion, HttpResponse.BodyHandler<T> lector) {
+            this.peticion = peticion;
+            this.lector = lector;
+        }
+
+        /** Lanza otra petición igual, si quedan intentos. */
+        synchronized boolean lanzar() {
+            if (ganador.isDone() || lanzados.size() >= MAX_INTENTOS) {
+                return false;
+            }
+            CompletableFuture<HttpResponse<T>> intento = http.sendAsync(peticion, lector);
+            lanzados.add(intento);
+            intento.whenComplete(this::alTerminar);
+            return true;
+        }
+
+        private synchronized void alTerminar(HttpResponse<T> respuesta, Throwable error) {
+            if (error == null && respuesta.statusCode() < 500) {
+                ganador.complete(respuesta);
+                return;
+            }
+            if (error instanceof CancellationException) {
+                return;
+            }
+            String motivo = error != null ? error.toString() : "ha respondido " + respuesta.statusCode();
+            fallidos++;
+            if (lanzar()) {
+                log.warn("OpenAI ha fallado ({}), reintento", motivo);
+            } else if (fallidos >= lanzados.size()) {
+                ganador.completeExceptionally(new IOException("OpenAI ha fallado " + fallidos + " veces: " + motivo));
+            }
+        }
+
+        synchronized void cancelarTodos() {
+            lanzados.forEach(intento -> intento.cancel(true));
         }
     }
 

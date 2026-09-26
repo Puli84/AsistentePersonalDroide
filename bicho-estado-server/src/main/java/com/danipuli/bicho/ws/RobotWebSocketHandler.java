@@ -77,6 +77,8 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     private final EstadoWebSocketHandler estado;
 
     private final Map<String, Boolean> modosEscucha = new ConcurrentHashMap<>();
+    /** Por sesión: ms desde la última respuesta cuando la ESP32 empezó a grabar. */
+    private final Map<String, Long> respuestaAlEmpezar = new ConcurrentHashMap<>();
 
     /** Volumen del altavoz de la ESP32 (0..100), o -1 si aún no lo sabemos. */
     private volatile int volumen = -1;
@@ -142,6 +144,9 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                 // "escucha": la ESP32 ha oído voz ella sola (solo cuenta si dices su nombre)
                 boolean escucha = "escucha".equals(json.path("modo").asText("boton"));
                 modosEscucha.put(session.getId(), escucha);
+                // La ventana para seguir sin decir el nombre se mide al EMPEZAR a hablar, no cuando
+                // acaba la transcripción (que puede tardar varios segundos)
+                respuestaAlEmpezar.put(session.getId(), msDesdeUltimaRespuesta());
                 if (!escucha) {
                     estado.cambiarEstado(Estado.ESCUCHANDO, "");
                 }
@@ -149,6 +154,7 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
             case "fin_audio" -> {
                 ByteArrayOutputStream grabacion = grabaciones.remove(session.getId());
                 boolean escucha = Boolean.TRUE.equals(modosEscucha.remove(session.getId()));
+                Long msDesdeRespuesta = respuestaAlEmpezar.remove(session.getId());
                 if (grabacion == null || grabacion.size() == 0) {
                     if (!escucha) {
                         estado.cambiarEstado(Estado.REPOSO, "");
@@ -158,15 +164,18 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                 }
                 log.info("Audio recibido de la ESP32 ({}): {} bytes (~{} s)", escucha ? "escucha" : "botón",
                         grabacion.size(), grabacion.size() / 32_000.0);
-                eventos.publishEvent(new AudioEsp32Recibido(session, grabacion.toByteArray(), escucha));
+                eventos.publishEvent(new AudioEsp32Recibido(session, grabacion.toByteArray(), escucha,
+                        msDesdeRespuesta == null ? Long.MAX_VALUE : msDesdeRespuesta));
             }
             case "reproduccion_fin" -> {
                 if (cerrarAlAcabar) {
                     // Se ha despedido: hasta que no le llamen por su nombre, no escucha
                     cerrarAlAcabar = false;
                     ultimaRespuestaFin = 0;
+                    log.info("La ESP32 ha terminado de hablar y se ha despedido: ahora solo responde a su nombre");
                 } else {
                     ultimaRespuestaFin = System.currentTimeMillis();
+                    log.info("La ESP32 ha terminado de hablar: se le puede seguir hablando sin decir su nombre");
                 }
                 estado.cambiarEstado(Estado.REPOSO, "");
             }
@@ -347,9 +356,12 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     /**
      * Evento: una ESP32 ha terminado de grabar lo que le has dicho.
      *
-     * @param escucha true si lo grabó ella sola al oír voz (hay que comprobar que dices su nombre);
-     *                false si has pulsado el botón
+     * @param escucha          true si lo grabó ella sola al oír voz (hay que comprobar que dices su
+     *                         nombre); false si has pulsado el botón
+     * @param msDesdeRespuesta ms que llevaba callado el robot cuando empezaste a hablar
+     *                         (Long.MAX_VALUE si no venía de una respuesta, o si se despidió)
      */
-    public record AudioEsp32Recibido(WebSocketSession sesion, byte[] pcm16k, boolean escucha) {
+    public record AudioEsp32Recibido(WebSocketSession sesion, byte[] pcm16k, boolean escucha,
+                                     long msDesdeRespuesta) {
     }
 }

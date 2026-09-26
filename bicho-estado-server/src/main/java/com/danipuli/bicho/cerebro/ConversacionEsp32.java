@@ -107,9 +107,11 @@ public class ConversacionEsp32 {
             return null;
         }
         boolean conNombre = detectorNombre.contieneNombre(texto);
-        boolean enConversacion = robot.msDesdeUltimaRespuesta() < ventanaMs;
+        boolean enConversacion = evento.msDesdeRespuesta() < ventanaMs;
         if (texto.isBlank() || (!conNombre && !enConversacion)) {
-            log.info("Oído sin nombre, lo ignoro: '{}'", texto);
+            log.info("Oído sin nombre, lo ignoro: '{}' ({})", texto, evento.msDesdeRespuesta() == Long.MAX_VALUE
+                    ? "no estaba en conversación"
+                    : "empezaste a hablar " + evento.msDesdeRespuesta() / 1000.0 + " s después de su respuesta");
             robot.enviarIgnorado(evento.sesion());
             return null;
         }

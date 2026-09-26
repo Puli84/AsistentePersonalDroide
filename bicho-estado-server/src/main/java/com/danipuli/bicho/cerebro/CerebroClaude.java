@@ -211,6 +211,14 @@ public class CerebroClaude {
      * (las herramientas que pida Claude ya se han ejecutado al volver).
      */
     public synchronized Respuesta conversar(String textoUsuario) {
+        return conversar(textoUsuario, false);
+    }
+
+    /**
+     * @param recienDespertado true si estaba dormido (en espera) y le acaban de llamar por su
+     *                         nombre: se le dice a Claude para que reaccione (según la personalidad)
+     */
+    public synchronized Respuesta conversar(String textoUsuario, boolean recienDespertado) {
         if (!configurado) {
             throw new IllegalStateException(
                     "Falta la API key de Anthropic: ponla en src/main/resources/secrets.properties (bicho.anthropic.api-key)");
@@ -227,7 +235,10 @@ public class CerebroClaude {
         msMovimientoTurno = 0;
         // Se lee en cada turno: así puedes cambiar la personalidad sin reiniciar el servidor
         String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionFecha() + seccionVolumen()
-                + seccionMemoria();
+                + seccionMemoria()
+                + (recienDespertado
+                        ? "\nAhora mismo estabas dormido en modo de espera y te acaban de despertar diciendo tu nombre.\n"
+                        : "");
 
         for (int vuelta = 0; vuelta < MAX_VUELTAS_HERRAMIENTAS; vuelta++) {
             MessageCreateParams params = MessageCreateParams.builder()

@@ -1,0 +1,163 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+<title>Mando RoboDragón</title>
+<style>
+  :root{
+    --bg:#eef0f2; --panel:#ffffff; --ink:#1c2024; --sub:#6b7480; --line:#d7dbe0;
+    --accent:#ffb454; --accent-soft:#ffb45433; --ok:#4caf7d; --err:#ff6b6b; --ring:#5ee7ff;
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark){
+    :root{
+      --bg:#111417; --panel:#191d22; --ink:#eef0f2; --sub:#8a93a0; --line:#2a2f36;
+      --accent:#ffc274; --accent-soft:#ffc27433; --ring:#6ff0ff; color-scheme: dark;
+    }
+  }
+  *{ box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html, body{ height:100%; }
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display:flex; justify-content:center; padding:20px 16px;
+    user-select:none; -webkit-user-select:none;
+  }
+  main{ width:100%; max-width:420px; display:flex; flex-direction:column; gap:18px; }
+  header{ display:flex; justify-content:space-between; align-items:baseline; gap:12px; }
+  h1{ font-size:1.2rem; margin:0; }
+  a{ color:var(--sub); font-size:0.85rem; }
+  .conn{ display:inline-flex; align-items:center; gap:6px; font-family: ui-monospace, monospace; font-size:0.75rem; color:var(--sub); }
+  .conn .dot{ width:8px; height:8px; border-radius:50%; background:var(--err); }
+  .conn.ok .dot{ background:var(--ok); }
+
+  /* Cruceta: 3x3 con los botones en cruz y "parar" en el centro */
+  .cruceta{
+    display:grid; grid-template-columns:repeat(3, 1fr); gap:12px;
+    aspect-ratio:1; width:100%; touch-action:none;
+  }
+  .cruceta button{
+    font-size:2.2rem; border-radius:22px; border:2px solid var(--line);
+    background:var(--panel); color:var(--ink); touch-action:none; cursor:pointer;
+    transition: transform .08s ease, background .08s ease, border-color .08s ease;
+  }
+  .cruceta button.pulsado{ background:var(--accent-soft); border-color:var(--accent); transform:scale(.95); }
+  .cruceta .parar{ font-size:1rem; font-weight:700; letter-spacing:.05em; color:var(--err); border-color:var(--err); }
+  .cruceta .hueco{ visibility:hidden; }
+  #adelante{ grid-column:2; grid-row:1; }
+  #girar_izquierda{ grid-column:1; grid-row:2; }
+  #parar{ grid-column:2; grid-row:2; }
+  #girar_derecha{ grid-column:3; grid-row:2; }
+  #atras{ grid-column:2; grid-row:3; }
+
+  .velocidad{ background:var(--panel); border:1px solid var(--line); border-radius:14px; padding:14px 16px; display:flex; flex-direction:column; gap:8px; }
+  .velocidad label{ display:flex; justify-content:space-between; font-size:0.9rem; color:var(--sub); }
+  .velocidad output{ font-family: ui-monospace, monospace; color:var(--ink); font-weight:600; }
+  input[type=range]{ width:100%; accent-color:var(--accent); height:28px; }
+  .nota{ margin:0; font-size:0.8rem; color:var(--sub); line-height:1.4; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Mando RoboDragón</h1>
+    <a href="/">cara y chat</a>
+  </header>
+  <p class="conn" id="conn"><span class="dot"></span><span id="connLabel">conectando…</span></p>
+
+  <div class="cruceta" id="cruceta">
+    <button type="button" id="adelante" aria-label="Adelante">▲</button>
+    <button type="button" id="girar_izquierda" aria-label="Girar a la izquierda">◀</button>
+    <button type="button" id="parar" class="parar" aria-label="Parar">PARAR</button>
+    <button type="button" id="girar_derecha" aria-label="Girar a la derecha">▶</button>
+    <button type="button" id="atras" aria-label="Atrás">▼</button>
+  </div>
+
+  <div class="velocidad">
+    <label for="vel">Velocidad <output id="velValor">50</output></label>
+    <input type="range" id="vel" min="20" max="100" step="5" value="50" />
+  </div>
+
+  <p class="nota">Mantén pulsada una flecha para moverlo; al soltar se para. El servidor limita la
+    velocidad máxima (bicho.ruedas.velocidad-max) y, si se corta la wifi, las ruedas se paran solas.</p>
+</main>
+
+<script>
+(function(){
+  'use strict';
+
+  // Cada orden mueve las ruedas 400 ms (lo pone el servidor); mientras mantienes pulsado se
+  // repite antes de que se acabe, y al soltar deja de llegar y se para sola aunque se pierda el "parar"
+  var MS_ENTRE_ORDENES = 150;
+
+  var connEl = document.getElementById('conn');
+  var connLabel = document.getElementById('connLabel');
+  var velEl = document.getElementById('vel');
+  var velValor = document.getElementById('velValor');
+  var ws = null;
+  var repetidor = null;
+  var botonActivo = null;
+
+  function conectar(){
+    var protocolo = location.protocol === 'https:' ? 'wss://' : 'ws://';
+    ws = new WebSocket(protocolo + location.host + '/ws/robot?cliente=mando');
+    ws.onopen = function(){ connEl.classList.add('ok'); connLabel.textContent = 'conectado al servidor'; };
+    ws.onclose = function(){
+      connEl.classList.remove('ok');
+      connLabel.textContent = 'desconectado — reintentando…';
+      soltar();
+      setTimeout(conectar, 2000);
+    };
+    ws.onerror = function(){ ws.close(); };
+    ws.onmessage = function(){ /* los comandos que reparte el servidor no nos interesan */ };
+  }
+
+  function enviar(accion){
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ tipo: 'mando', accion: accion, velocidad: Number(velEl.value) }));
+    }
+  }
+
+  function pulsar(boton){
+    soltar();
+    botonActivo = boton;
+    boton.classList.add('pulsado');
+    if (navigator.vibrate) navigator.vibrate(15);
+    if (boton.id === 'parar') { enviar('parar'); return; }
+    enviar(boton.id);
+    repetidor = setInterval(function(){ enviar(boton.id); }, MS_ENTRE_ORDENES);
+  }
+
+  function soltar(){
+    if (!botonActivo) return;
+    var eraMovimiento = botonActivo.id !== 'parar';
+    botonActivo.classList.remove('pulsado');
+    botonActivo = null;
+    clearInterval(repetidor);
+    repetidor = null;
+    if (eraMovimiento) enviar('parar');
+  }
+
+  Array.prototype.forEach.call(document.querySelectorAll('.cruceta button'), function(boton){
+    boton.addEventListener('pointerdown', function(e){
+      e.preventDefault();
+      boton.setPointerCapture(e.pointerId);
+      pulsar(boton);
+    });
+    boton.addEventListener('pointerup', soltar);
+    boton.addEventListener('pointercancel', soltar);
+    boton.addEventListener('lostpointercapture', soltar);
+    boton.addEventListener('contextmenu', function(e){ e.preventDefault(); });
+  });
+
+  // Por si la página se va a segundo plano con un botón pulsado
+  document.addEventListener('visibilitychange', function(){ if (document.hidden) soltar(); });
+
+  velEl.addEventListener('input', function(){ velValor.textContent = velEl.value; });
+
+  conectar();
+})();
+</script>
+</body>
+</html>

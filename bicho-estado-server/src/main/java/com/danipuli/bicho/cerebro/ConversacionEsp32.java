@@ -67,9 +67,10 @@ public class ConversacionEsp32 {
     private void atender(RobotWebSocketHandler.AudioEsp32Recibido evento) {
         byte[] wav = aWav(evento.pcm16k(), SAMPLE_RATE_MICRO);
         diagnosticar(evento.pcm16k(), wav);
+        // Con el botón: si no estaba ya en conversación, es que estaba dormido y lo has despertado
         AsistenteService.Resultado r = evento.escucha()
                 ? turnoDeEscucha(evento, wav)
-                : asistente.turnoDeVoz(wav, "voz.wav", "pcm");
+                : asistente.turnoDeVoz(wav, "voz.wav", "pcm", evento.msDesdeRespuesta() >= ventanaMs);
         if (r == null) {
             return; // no iba para el robot: ya se ha avisado a la ESP32
         }
@@ -115,8 +116,11 @@ public class ConversacionEsp32 {
             robot.enviarIgnorado(evento.sesion());
             return null;
         }
-        log.info("Oído {}: '{}'", conNombre ? "con su nombre" : "siguiendo la conversación", texto);
-        return asistente.turnoDeTexto(texto, "pcm");
+        // Si le llaman por su nombre fuera de una conversación, estaba dormido: lo acaban de despertar
+        boolean despertado = conNombre && !enConversacion;
+        log.info("Oído {}: '{}'", despertado ? "con su nombre (lo despiertan)"
+                : conNombre ? "con su nombre" : "siguiendo la conversación", texto);
+        return asistente.turnoDeTexto(texto, "pcm", despertado);
     }
 
     /**

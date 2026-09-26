@@ -38,6 +38,11 @@ public class AsistenteService {
      * @param formatoAudio formato de la voz de respuesta: "mp3" (navegador) o "pcm" (ESP32)
      */
     public Resultado turnoDeVoz(byte[] audio, String nombreFichero, String formatoAudio) {
+        return turnoDeVoz(audio, nombreFichero, formatoAudio, false);
+    }
+
+    /** @param recienDespertado true si el robot estaba dormido (en espera) hasta ahora */
+    public Resultado turnoDeVoz(byte[] audio, String nombreFichero, String formatoAudio, boolean recienDespertado) {
         estado.cambiarEstado(Estado.ESCUCHANDO, "");
         String texto;
         try {
@@ -51,16 +56,21 @@ public class AsistenteService {
             estado.cambiarEstado(Estado.REPOSO, "");
             return Resultado.conError("No he oído nada");
         }
-        return turnoDeTexto(texto, formatoAudio);
+        return turnoDeTexto(texto, formatoAudio, recienDespertado);
     }
 
     /** Turno a partir de texto (escrito, o ya transcrito). */
     public Resultado turnoDeTexto(String textoUsuario, String formatoAudio) {
+        return turnoDeTexto(textoUsuario, formatoAudio, false);
+    }
+
+    /** @param recienDespertado true si el robot estaba dormido (en espera) hasta ahora */
+    public Resultado turnoDeTexto(String textoUsuario, String formatoAudio, boolean recienDespertado) {
         estado.cambiarEstado(Estado.ESCUCHANDO, "");
 
         CerebroClaude.Respuesta respuesta;
         try {
-            respuesta = cerebro.conversar(textoUsuario);
+            respuesta = cerebro.conversar(textoUsuario, recienDespertado);
         } catch (Exception ex) {
             log.warn("Fallo al hablar con Claude", ex);
             estado.cambiarEstado(Estado.REPOSO, "");

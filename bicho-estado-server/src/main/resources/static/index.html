@@ -151,6 +151,32 @@
   .face.emo-pensativo .eye-pupil{ transform:translate(-6px,-7px); animation:none; }
   .face.emo-pensativo .eye::before{ height:22%; }
 
+  /* ---- Dormido: en espera un rato sin que nadie le hable. Ojos cerrados (los dos párpados se
+     juntan en una rayita), respiración lenta y unas Z flotando ---- */
+  .face.dormido .eye{ animation: respirar 4s ease-in-out infinite; background:transparent; box-shadow:none; }
+  .face.dormido .eye-iris{ visibility:hidden; }
+  /* El ojo cerrado es una rayita curva, como una sonrisa pequeña: ‿ */
+  .face.dormido .eye::before{
+    height:50%; left:12%; width:76%; transform:none !important; background:transparent;
+    border-bottom:4px solid var(--eye-ring); border-radius:0 0 50% 50%;
+    filter: drop-shadow(0 2px 4px var(--eye-ring-glow));
+  }
+  .face.dormido .eye::after{ height:0; }
+  @keyframes respirar{ 0%,100%{ transform:scale(1); } 50%{ transform:scale(.94); } }
+
+  .zzz{ position:absolute; top:18%; right:22%; display:none; font-family: ui-monospace, monospace;
+        font-weight:700; color:var(--eye-ring); pointer-events:none; }
+  .zzz.visible{ display:block; }
+  .zzz span{ position:absolute; opacity:0; animation: flotarZ 3s ease-in infinite; }
+  .zzz span:nth-child(1){ font-size:.8rem; }
+  .zzz span:nth-child(2){ font-size:1rem; animation-delay:1s; }
+  .zzz span:nth-child(3){ font-size:1.25rem; animation-delay:2s; }
+  @keyframes flotarZ{
+    0%   { opacity:0; transform:translate(0,0); }
+    20%  { opacity:1; }
+    100% { opacity:0; transform:translate(18px,-34px); }
+  }
+
   .chat{ display:flex; flex-direction:column; gap:6px; max-height:260px; overflow-y:auto; font-size:0.85rem; }
   .chat .yo{ align-self:flex-end; background:var(--accent-soft); border:1px solid var(--accent); border-radius:12px 12px 2px 12px; padding:6px 10px; max-width:85%; }
   .chat .bicho{ align-self:flex-start; background:var(--bg); border:1px solid var(--line); border-radius:12px 12px 12px 2px; padding:6px 10px; max-width:85%; }
@@ -181,6 +207,7 @@
     <h1>Cara de Bicho — en vivo</h1>
     <p class="lead">Conectada por WebSocket a este mismo servidor Spring Boot (<code>/ws/estado</code>). Solo ojos, sin boca.</p>
     <p class="conn" id="conn"><span class="dot"></span><span id="connLabel">conectando…</span></p>
+    <p class="lead"><a href="/mando.html">🎮 Mando para moverlo desde el móvil</a></p>
   </div>
 
   <div class="device">
@@ -190,6 +217,7 @@
         <div class="eye left"><div class="eye-iris"><div class="eye-pupil"></div></div></div>
         <div class="eye right"><div class="eye-iris"><div class="eye-pupil"></div></div></div>
       </div>
+      <div class="zzz" id="zzz"><span>z</span><span>z</span><span>Z</span></div>
       <div class="caption" id="caption"></div>
     </div>
   </div>
@@ -247,13 +275,40 @@
 
   var emociones = ['neutral', 'contento', 'triste', 'sorprendido', 'enfadado', 'pensativo'];
 
+  // Tras un rato en reposo sin que nadie le hable, se duerme. Son los mismos segundos que la
+  // ventana en la que se le puede seguir hablando sin decir su nombre
+  // (bicho.activacion.ventana-segundos): después de eso, hay que despertarle por su nombre.
+  var MS_HASTA_DORMIRSE = 8000;
+  var zzzEl = document.getElementById('zzz');
+  var dormido = false;
+  var temporizadorSueno = null;
+
+  function dormirse(){
+    temporizadorSueno = null;
+    dormido = true;
+    faceEl.classList.add('dormido');
+    zzzEl.classList.add('visible');
+    statusLabel.textContent = 'durmiendo';
+  }
+
   function applyState(estado, texto, emocion){
     if (!labels.hasOwnProperty(estado)) estado = 'reposo';
     if (emociones.indexOf(emocion) < 0) emocion = 'neutral';
 
+    if (estado === 'reposo') {
+      // El reposo puede llegar repetido: no reinicia la cuenta ni despierta si ya duerme
+      if (!dormido && !temporizadorSueno) temporizadorSueno = setTimeout(dormirse, MS_HASTA_DORMIRSE);
+    } else {
+      clearTimeout(temporizadorSueno);
+      temporizadorSueno = null;
+      dormido = false;
+    }
+
     statusEl.className = 'status ' + estado;
-    statusLabel.textContent = labels[estado] + (emocion !== 'neutral' ? ' · ' + emocion : '');
-    faceEl.className = 'face ' + estado + ' emo-' + emocion;
+    statusLabel.textContent = dormido ? 'durmiendo'
+        : labels[estado] + (emocion !== 'neutral' ? ' · ' + emocion : '');
+    faceEl.className = 'face ' + estado + ' emo-' + emocion + (dormido ? ' dormido' : '');
+    zzzEl.classList.toggle('visible', dormido);
     captionEl.textContent = estado === 'hablando' ? (texto || '') : '';
 
     buttons.forEach(function(b){

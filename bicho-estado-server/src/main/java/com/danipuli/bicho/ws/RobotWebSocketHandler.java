@@ -6,6 +6,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.BinaryMessage;
@@ -19,6 +20,7 @@ import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.ArrayList;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -32,9 +34,11 @@ import java.util.concurrent.TimeUnit;
 /**
  * Handler del WebSocket en /ws/robot: el canal entre el servidor y el cuerpo del bicho.
  *
- * Se conectan dos tipos de clientes:
+ * Se conectan tres tipos de clientes:
  *   - la ESP32:          ws://servidor:8080/ws/robot?cliente=esp32
  *   - la web de pruebas: ws://servidor:8080/ws/robot?cliente=web  (solo para ver los comandos)
+ *   - el mando del móvil: ws://servidor:8080/ws/robot?cliente=mando  (mando.html)
+ *       { "tipo": "mando", "accion": "adelante", "velocidad": 50 }  ← repetido mientras pulsas
  *
  * Servidor → todos (texto JSON), los comandos físicos:
  *   { "cmd": "ruedas", "accion": "adelante", "velocidad": 60, "duracion_ms": 1000 }
@@ -70,6 +74,14 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     /** Cuánto audio mandamos por delante de lo que ya está sonando en la ESP32. */
     private static final long VENTAJA_AUDIO_MS = 1000;
 
+    /** Movimientos que acepta la página del mando, y cuánto dura cada orden. */
+    private static final Set<String> ACCIONES_MANDO =
+            Set.of("adelante", "atras", "girar_izquierda", "girar_derecha", "parar");
+    private static final long MS_MOVIMIENTO_MANDO = 400;
+
+    private final long velocidadMax;
+    private volatile String ultimaAccionMando = "";
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Set<WebSocketSession> sesiones = new CopyOnWriteArraySet<>();
     private final Map<String, ByteArrayOutputStream> grabaciones = new ConcurrentHashMap<>();
@@ -102,9 +114,11 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     /** Cuándo acaba el último movimiento en cola (0 = ruedas paradas). */
     private long finMovimientos = 0;
 
-    public RobotWebSocketHandler(ApplicationEventPublisher eventos, EstadoWebSocketHandler estado) {
+    public RobotWebSocketHandler(ApplicationEventPublisher eventos, EstadoWebSocketHandler estado,
+                                 @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax) {
         this.eventos = eventos;
         this.estado = estado;
+        this.velocidadMax = velocidadMax;
     }
 
     @Override
@@ -194,8 +208,34 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                     default -> log.info("La ESP32 se ha encendido (motivo: {})", reinicio);
                 }
             }
+            case "mando" -> ordenDelMando(json);
             default -> log.info("Mensaje de /ws/robot sin tipo conocido: {}", message.getPayload());
         }
+    }
+
+    /**
+     * Orden de la página del mando (mando.html, desde el móvil). Llega repetida cada ~150 ms
+     * mientras mantienes pulsada una flecha, y cada una mueve las ruedas solo MS_MOVIMIENTO_MANDO:
+     * si se corta la wifi o se pierde el "parar", el robot se para solo.
+     */
+    private void ordenDelMando(JsonNode json) {
+        String accion = json.path("accion").asText("");
+        if (!ACCIONES_MANDO.contains(accion)) {
+            return;
+        }
+        // Lo que mandas desde el móvil manda sobre los movimientos que hubiera pedido Claude
+        cancelarMovimientos();
+        boolean parar = accion.equals("parar");
+        long velocidad = parar ? 0 : Math.max(0, Math.min(velocidadMax, json.path("velocidad").asLong(50)));
+        Map<String, Object> comando = new LinkedHashMap<>();
+        comando.put("cmd", "ruedas");
+        comando.put("accion", accion);
+        comando.put("velocidad", velocidad);
+        comando.put("duracion_ms", parar ? 0 : MS_MOVIMIENTO_MANDO);
+        // Solo se apunta en el log cuando cambias de flecha, no cada repetición
+        boolean nueva = !accion.equals(ultimaAccionMando);
+        ultimaAccionMando = accion;
+        enviarComando(comando, nueva);
     }
 
     @Override
@@ -217,11 +257,17 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
      * Manda un comando a todos los conectados (ESP32 y webs de pruebas).
      */
     public void enviarComando(Map<String, Object> comando) {
+        enviarComando(comando, true);
+    }
+
+    private void enviarComando(Map<String, Object> comando, boolean registrar) {
         String json = aJson(comando);
         if (json == null) {
             return;
         }
-        log.info("Comando robot: {}", json);
+        if (registrar) {
+            log.info("Comando robot: {}", json);
+        }
         for (WebSocketSession sesion : sesiones) {
             enviar(sesion, new TextMessage(json));
         }

@@ -1,0 +1,73 @@
+{
+  "name": "RoboDragón - Leer Google Calendar",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "robodragon-leer-calendario",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook de RoboDragón",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "robodragon-leer-calendario"
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "calendar": {
+          "__rl": true,
+          "value": "",
+          "mode": "list"
+        },
+        "returnAll": true,
+        "timeMin": "={{ ($json.body.fecha ? DateTime.fromISO($json.body.fecha, { zone: 'Atlantic/Canary' }) : $now.setZone('Atlantic/Canary').plus({ days: Number($json.body.dias_desde_hoy) || 0 })).startOf('day').toISO() }}",
+        "timeMax": "={{ ($json.body.fecha ? DateTime.fromISO($json.body.fecha, { zone: 'Atlantic/Canary' }) : $now.setZone('Atlantic/Canary').plus({ days: Number($json.body.dias_desde_hoy) || 0 })).startOf('day').plus({ days: Number($json.body.num_dias) || 1 }).toISO() }}",
+        "options": {
+          "orderBy": "startTime"
+        }
+      },
+      "name": "Leer eventos",
+      "type": "n8n-nodes-base.googleCalendar",
+      "typeVersion": 1.3,
+      "position": [260, 0],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Convierte los eventos de Google en una lista corta para que RoboDragón la lea\nconst eventos = $input.all().map(i => i.json).filter(e => e.start);\nif (eventos.length === 0) {\n  return [{ json: { texto: 'No hay nada en el calendario para esas fechas.' } }];\n}\nconst lineas = eventos.map(e => {\n  const titulo = e.summary || '(sin título)';\n  if (e.start.date) {\n    return DateTime.fromISO(e.start.date).setLocale('es').toFormat('cccc d') + ', todo el día: ' + titulo;\n  }\n  const inicio = DateTime.fromISO(e.start.dateTime).setZone('Atlantic/Canary').setLocale('es');\n  return inicio.toFormat(\"cccc d 'a las' HH:mm\") + ': ' + titulo;\n});\nreturn [{ json: { texto: lineas.join('\\n') } }];"
+      },
+      "name": "Formatear la lista",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [520, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.texto }}",
+        "options": {}
+      },
+      "name": "Responder a RoboDragón",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [780, 0]
+    }
+  ],
+  "connections": {
+    "Webhook de RoboDragón": {
+      "main": [[{ "node": "Leer eventos", "type": "main", "index": 0 }]]
+    },
+    "Leer eventos": {
+      "main": [[{ "node": "Formatear la lista", "type": "main", "index": 0 }]]
+    },
+    "Formatear la lista": {
+      "main": [[{ "node": "Responder a RoboDragón", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "timezone": "Atlantic/Canary"
+  }
+}

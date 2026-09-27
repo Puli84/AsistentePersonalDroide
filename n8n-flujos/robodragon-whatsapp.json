@@ -1,0 +1,71 @@
+{
+  "name": "RoboDragón - WhatsApp a Daniel (CallMeBot)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "robodragon-whatsapp",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook de RoboDragón",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "robodragon-whatsapp"
+    },
+    {
+      "parameters": {
+        "url": "https://api.callmebot.com/whatsapp.php",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "phone",
+              "value": "PON_AQUI_TU_NUMERO_CON_+34"
+            },
+            {
+              "name": "text",
+              "value": "=🐉 *RoboDragón*: {{ $json.body.mensaje }}"
+            },
+            {
+              "name": "apikey",
+              "value": "PON_AQUI_TU_APIKEY"
+            }
+          ]
+        },
+        "options": {
+          "response": {
+            "response": {
+              "responseFormat": "text"
+            }
+          }
+        }
+      },
+      "name": "Enviar WhatsApp (CallMeBot)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [260, 0]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=WhatsApp enviado a Daniel.",
+        "options": {}
+      },
+      "name": "Responder a RoboDragón",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [520, 0]
+    }
+  ],
+  "connections": {
+    "Webhook de RoboDragón": {
+      "main": [[{ "node": "Enviar WhatsApp (CallMeBot)", "type": "main", "index": 0 }]]
+    },
+    "Enviar WhatsApp (CallMeBot)": {
+      "main": [[{ "node": "Responder a RoboDragón", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {}
+}

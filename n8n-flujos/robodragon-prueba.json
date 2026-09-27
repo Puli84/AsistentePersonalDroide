@@ -1,0 +1,43 @@
+{
+  "name": "RoboDragón - prueba",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "robodragon-prueba",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook de RoboDragón",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "robodragon-prueba"
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=n8n funciona. Me has mandado: {{ $json.body.texto }}. Son las {{ $now.setZone('Atlantic/Canary').toFormat('HH:mm') }}.",
+        "options": {}
+      },
+      "name": "Responder a RoboDragón",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [260, 0]
+    }
+  ],
+  "connections": {
+    "Webhook de RoboDragón": {
+      "main": [
+        [
+          {
+            "node": "Responder a RoboDragón",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {}
+}

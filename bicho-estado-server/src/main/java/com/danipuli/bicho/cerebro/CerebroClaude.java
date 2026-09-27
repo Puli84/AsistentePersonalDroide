@@ -14,6 +14,7 @@ import com.anthropic.models.messages.Tool;
 import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
 import com.anthropic.models.messages.WebSearchTool20260209;
+import com.danipuli.bicho.n8n.HerramientasN8n;
 import com.danipuli.bicho.ws.EstadoWebSocketHandler;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -141,6 +142,10 @@ public class CerebroClaude {
     private long msMovimientoTurno;
 
     private final List<Tool> herramientas;
+    /** Automatizaciones de n8n (se releen en cada turno); null en los tests. */
+    private final HerramientasN8n n8n;
+    /** Las de n8n que tiene el turno en curso, por nombre. */
+    private final Map<String, HerramientasN8n.Definicion> herramientasN8nTurno = new LinkedHashMap<>();
     private final List<MessageParam> historial = new ArrayList<>();
     /**
      * Los mensajes del historial con los que empieza cada turno (lo que dijo el usuario):
@@ -164,7 +169,8 @@ public class CerebroClaude {
                          @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax,
                          @Value("${bicho.ruedas.max-segundos-por-respuesta:20}") long maxSegundosPorRespuesta,
                          EstadoWebSocketHandler estado,
-                         RobotWebSocketHandler robot) {
+                         RobotWebSocketHandler robot,
+                         HerramientasN8n n8n) {
         this.configurado = apiKey != null && !apiKey.isBlank() && !apiKey.startsWith("PON_AQUI");
         this.client = configurado ? crearCliente(apiKey, workspaceId) : null;
         this.modelo = modelo;
@@ -182,6 +188,7 @@ public class CerebroClaude {
         this.maxMsMovimientoTurno = maxSegundosPorRespuesta * 1000;
         this.estado = estado;
         this.robot = robot;
+        this.n8n = n8n;
         this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
                 herramientaVolumen(), herramientaTerminar());
         cargarConversacion();
@@ -239,6 +246,16 @@ public class CerebroClaude {
                 + (recienDespertado
                         ? "\nAhora mismo estabas dormido en modo de espera y te acaban de despertar diciendo tu nombre.\n"
                         : "");
+        // Las automatizaciones de n8n también se leen en cada turno (herramientas-n8n.json)
+        List<com.anthropic.models.messages.ToolUnion> todas = new ArrayList<>();
+        herramientas.forEach(h -> todas.add(com.anthropic.models.messages.ToolUnion.ofTool(h)));
+        herramientasN8nTurno.clear();
+        if (n8n != null) {
+            for (HerramientasN8n.Definicion d : n8n.leer()) {
+                herramientasN8nTurno.put(d.nombre(), d);
+                todas.add(com.anthropic.models.messages.ToolUnion.ofTool(HerramientasN8n.aTool(d)));
+            }
+        }
 
         for (int vuelta = 0; vuelta < MAX_VUELTAS_HERRAMIENTAS; vuelta++) {
             MessageCreateParams params = MessageCreateParams.builder()
@@ -246,7 +263,7 @@ public class CerebroClaude {
                     .maxTokens(4096L)
                     .system(promptSistema)
                     .messages(mensajes)
-                    .tools(herramientas.stream().map(com.anthropic.models.messages.ToolUnion::ofTool).toList())
+                    .tools(todas)
                     // Búsqueda en internet (la hace Anthropic): tiempo, noticias, resultados...
                     .addTool(WebSearchTool20260209.builder().maxUses(maxBusquedas).build())
                     // Conversación por voz: prima la rapidez de respuesta
@@ -431,7 +448,9 @@ public class CerebroClaude {
                 acciones.add(Map.of("cmd", "terminar_conversacion"));
                 yield "Hecho: cuando acabes esta frase dejarás de escuchar hasta que te llamen por tu nombre.";
             }
-            default -> "Error: herramienta desconocida " + uso.name();
+            default -> herramientasN8nTurno.containsKey(uso.name())
+                    ? n8n.ejecutar(herramientasN8nTurno.get(uso.name()), entrada)
+                    : "Error: herramienta desconocida " + uso.name();
         };
     }
 

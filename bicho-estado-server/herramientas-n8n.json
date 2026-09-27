@@ -1,0 +1,43 @@
+[
+  {
+    "nombre": "probar_n8n",
+    "descripcion": "Prueba de la conexión con n8n (las automatizaciones). Úsala solo cuando te pidan probar n8n o las automatizaciones, y cuenta lo que te conteste.",
+    "url": "http://localhost:5678/webhook/robodragon-prueba",
+    "parametros": {
+      "texto": "Un texto cualquiera para la prueba, por ejemplo lo que te hayan dicho"
+    },
+    "confirmar": false
+  },
+  {
+    "nombre": "whatsapp_a_daniel",
+    "descripcion": "Envía un mensaje de WhatsApp a Daniel (solo puede escribirle a él, a nadie más). Úsala cuando te pidan mandar algo al móvil o por WhatsApp a Daniel: una nota, la lista de la compra, un recordatorio, un dato que acabas de buscar... Si te piden escribir a otra persona, di que de momento solo puedes escribirle a Daniel.",
+    "url": "http://localhost:5678/webhook/robodragon-whatsapp",
+    "parametros": {
+      "mensaje": "El texto del mensaje, claro y completo (puede tener varias líneas). Escríbelo tú, no copies la petición tal cual."
+    },
+    "confirmar": false
+  },
+  {
+    "nombre": "crear_evento_calendario",
+    "descripcion": "Crea un evento en el Google Calendar de Daniel; su móvil le avisará con una notificación a esa hora. Úsala cuando pidan poner una alarma, un recordatorio o una cita para un día y hora (\"recuérdame mañana a las 5 lo del dentista\", \"ponme una alarma a las 7\"). Calcula la fecha exacta a partir de la fecha y hora actuales. Si no dicen la hora, pregúntala antes. Después di en voz alta el día y la hora exactos que has puesto.",
+    "url": "http://localhost:5678/webhook/robodragon-calendario",
+    "parametros": {
+      "titulo": "Título corto del evento, por ejemplo 'Dentista de Leo' o 'Alarma: sacar la ropa'",
+      "dentro_de_minutos": "Si lo piden en relativo ('dentro de 10 minutos', 'en media hora', 'en 2 horas'), SOLO el número de minutos (10, 30, 120) y deja 'inicio' vacío: la hora exacta la calcula el sistema. Si dan una hora concreta, déjalo vacío",
+      "inicio": "Solo si dan un día u hora concretos ('mañana a las 5', 'el jueves a las 10'): fecha y hora en formato AAAA-MM-DDTHH:MM:SS, hora de Canarias, sin zona horaria. Por ejemplo 2026-09-28T17:00:00. Si es relativo, déjalo vacío",
+      "duracion_minutos": "Duración en minutos, como número. Si no la dicen, 30 (para una alarma, 5)"
+    },
+    "confirmar": false
+  },
+  {
+    "nombre": "leer_calendario",
+    "descripcion": "Lee los eventos del Google Calendar de la familia para un día o varios. Úsala cuando pregunten qué tienen hoy, mañana, el fin de semana, esta semana, un día concreto, o si tienen algo a tal hora. Resume lo que te devuelva en pocas frases habladas (horas y títulos), sin leer listas largas enteras.",
+    "url": "http://localhost:5678/webhook/robodragon-leer-calendario",
+    "parametros": {
+      "dias_desde_hoy": "Desde qué día mirar, contando desde hoy, como número: 0 = hoy, 1 = mañana, 2 = pasado mañana. Para 'el sábado' o 'el lunes', calcula cuántos días faltan. Déjalo vacío si das 'fecha'",
+      "fecha": "Solo si dicen una fecha concreta ('el 15 de octubre'): AAAA-MM-DD. Si no, déjalo vacío",
+      "num_dias": "Cuántos días mirar, como número: 1 para un solo día, 2 para el fin de semana, 7 para la semana"
+    },
+    "confirmar": false
+  }
+]

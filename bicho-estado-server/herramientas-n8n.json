@@ -39,5 +39,17 @@
       "num_dias": "Cuántos días mirar, como número: 1 para un solo día, 2 para el fin de semana, 7 para la semana"
     },
     "confirmar": false
+  },
+  {
+    "nombre": "borrar_evento_calendario",
+    "descripcion": "Borra un evento del Google Calendar de la familia. Úsala cuando pidan quitar, borrar o cancelar una cita, alarma o recordatorio. Si no sabes bien cómo se llama o qué día es, usa antes leer_calendario. Solo borra si encuentra exactamente un evento que encaje; si te contesta que no ha borrado nada, cuenta por qué y pregunta cuál.",
+    "url": "http://localhost:5678/webhook/robodragon-borrar-evento",
+    "parametros": {
+      "titulo": "Una o varias palabras del título del evento, por ejemplo 'dentista' o 'alarma'",
+      "dias_desde_hoy": "Qué día es, contando desde hoy, como número: 0 = hoy, 1 = mañana... Déjalo vacío si das 'fecha'",
+      "fecha": "Solo si es una fecha concreta: AAAA-MM-DD. Si no, vacío",
+      "hora": "Solo si hace falta distinguir entre varios: la hora de inicio en formato HH:MM (24 h). Si no, vacío"
+    },
+    "confirmar": true
   }
 ]

@@ -148,6 +148,7 @@ En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos 
 | `robodragon-whatsapp.json` | `whatsapp_a_daniel` | CallMeBot. Llega **desde el número de CallMeBot** (+34 644 95 42 75, guardado como "RoboDragón"). Solo a Daniel. En n8n hay que poner `phone` y `apikey` (el repo lleva `PON_AQUI_...`). Otra persona necesitaría su propia apikey |
 | `robodragon-calendario.json` | `crear_evento_calendario` | Parámetros `titulo`, `dentro_de_minutos` **o** `inicio`, `duracion_minutos`. Calendario **Familia**. Avisos por defecto del calendario, puestos a "0 minutos antes" para que funcione como alarma |
 | `robodragon-leer-calendario.json` | `leer_calendario` | Parámetros `dias_desde_hoy` **o** `fecha`, `num_dias`. Un nodo Code convierte los eventos en líneas "domingo 28 a las 17:00: …" |
+| `robodragon-borrar-evento.json` | `borrar_evento_calendario` | Parámetros `titulo`, `dias_desde_hoy` **o** `fecha`, `hora` (opcional). Busca los eventos del día y **solo borra si encaja exactamente uno**; si no, devuelve la lista. Con `confirmar: true`. Dos nodos de Google (buscar y borrar) con credencial y calendario **Familia** |
 
 **Google**: proyecto *RoboDragon* en console.cloud.google.com, Google Calendar API activada, OAuth externo con Daniel como **usuario de prueba**, cliente "Aplicación web" con URI de redirección `http://localhost:5678/rest/oauth2-credential/callback`. La credencial está guardada en n8n.
 

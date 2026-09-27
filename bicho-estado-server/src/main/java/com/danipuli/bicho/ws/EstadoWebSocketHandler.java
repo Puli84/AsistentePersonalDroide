@@ -55,6 +55,12 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
     /** Milisegundos estimados que se tarda en decir cada carácter (aprox. voz normal). */
     private static final long MS_POR_CARACTER = 65;
 
+    /**
+     * Lo que se muestra en pantalla sin "fija" (una lista, la agenda...) se quita solo este tiempo
+     * después de volver a reposo, es decir, al acabar la conversación. Lo fijo (una receta) se queda.
+     */
+    private static final long MS_QUITAR_PANTALLA_TEMPORAL = 60_000;
+
     private final ObjectMapper objectMapper = new ObjectMapper();
     private final Set<WebSocketSession> sesiones = new CopyOnWriteArraySet<>();
     private final ScheduledExecutorService scheduler = Executors.newSingleThreadScheduledExecutor(r -> {
@@ -73,6 +79,7 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
     // cambio de estado más reciente.
     private final AtomicLong version = new AtomicLong(0);
     private volatile ScheduledFuture<?> autoReposoProgramado;
+    private volatile ScheduledFuture<?> limpiezaPantalla;
 
     @Override
     public void afterConnectionEstablished(WebSocketSession session) {
@@ -117,6 +124,7 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
 
         log.info("Nuevo estado: {} ({} clientes, texto='{}')", estadoActual, sesiones.size(), textoActual);
         retransmitir();
+        programarLimpiezaPantalla();
 
         if (autoReposoProgramado != null) {
             autoReposoProgramado.cancel(false);
@@ -166,11 +174,33 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
      */
     public void mostrarPantalla(Map<String, Object> contenido) {
         this.pantallaActual = contenido;
+        programarLimpiezaPantalla();
         log.info(contenido == null ? "Pantalla: vuelven los ojos" : "Pantalla: {}", contenido == null ? "" : contenido.get("titulo"));
         String json = mensajePantalla();
         for (WebSocketSession sesion : sesiones) {
             enviarTexto(sesion, json);
         }
+    }
+
+    /**
+     * Contenido temporal + robot en reposo: se quita solo al rato. En cuanto vuelve a escuchar o
+     * hablar, se cancela (sigue la conversación). Lo fijo no se quita nunca solo.
+     */
+    private synchronized void programarLimpiezaPantalla() {
+        if (limpiezaPantalla != null) {
+            limpiezaPantalla.cancel(false);
+            limpiezaPantalla = null;
+        }
+        Map<String, Object> contenido = pantallaActual;
+        if (contenido == null || Boolean.TRUE.equals(contenido.get("fija")) || estadoActual != Estado.REPOSO) {
+            return;
+        }
+        limpiezaPantalla = scheduler.schedule(() -> {
+            if (pantallaActual == contenido && estadoActual == Estado.REPOSO) {
+                log.info("Se ha acabado la conversación: quito de la pantalla '{}'", contenido.get("titulo"));
+                mostrarPantalla(null);
+            }
+        }, MS_QUITAR_PANTALLA_TEMPORAL, TimeUnit.MILLISECONDS);
     }
 
     public Map<String, Object> getPantallaActual() {

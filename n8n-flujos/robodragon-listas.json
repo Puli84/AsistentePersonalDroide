@@ -1,0 +1,393 @@
+{
+  "name": "RoboDragón - Listas de Google Tasks (compra, tareas, trabajo...)",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "robodragon-listas",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook de RoboDragón",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [
+        0,
+        0
+      ],
+      "webhookId": "robodragon-listas"
+    },
+    {
+      "parameters": {
+        "url": "https://tasks.googleapis.com/tasks/v1/users/@me/lists",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googleTasksOAuth2Api",
+        "options": {}
+      },
+      "name": "Ver tus listas",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        220,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Busca la lista de Google Tasks por su nombre (sin mayúsculas ni tildes). Por defecto, la de la compra.\nconst pedido = $('Webhook de RoboDragón').first().json.body;\nconst normalizar = s => (s || '').toLowerCase().normalize('NFD').replace(/\\p{M}/gu, '').trim();\nconst listas = $input.first().json.items || [];\nconst buscada = normalizar(pedido.lista || 'compra');\nconst lista = listas.find(l => normalizar(l.title) === buscada)\n  || listas.find(l => normalizar(l.title).includes(buscada) || buscada.includes(normalizar(l.title)));\nif (!lista) {\n  return [{ json: { ok: false, mensaje: 'No tengo ninguna lista que se llame \"' + (pedido.lista || '') + '\". Las listas que hay son: ' + (listas.map(l => l.title).join(', ') || 'ninguna') + '. Si la quieres, créala en la app de Google Tasks.' } }];\n}\nreturn [{ json: { ok: true, listaId: lista.id, listaNombre: lista.title } }];"
+      },
+      "name": "Elegir la lista",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        440,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "lista-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "¿Existe la lista?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        660,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.mensaje }}",
+        "options": {}
+      },
+      "name": "Responder: no existe",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        880,
+        160
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "getAll",
+        "task": "={{ $('Elegir la lista').first().json.listaId }}",
+        "returnAll": true,
+        "additionalFields": {}
+      },
+      "name": "Leer la lista",
+      "type": "n8n-nodes-base.googleTasks",
+      "typeVersion": 1,
+      "position": [
+        880,
+        -40
+      ],
+      "alwaysOutputData": true
+    },
+    {
+      "parameters": {
+        "jsCode": "// Decide qué hacer con la lista elegida: añadir (sin duplicar), ver o quitar (solo si encaja uno)\nconst pedido = $('Webhook de RoboDragón').first().json.body;\nconst nombre = $('Elegir la lista').first().json.listaNombre;\nconst normalizar = s => (s || '').toLowerCase().normalize('NFD').replace(/\\p{M}/gu, '').trim();\nconst accion = normalizar(pedido.accion);\nconst lista = $input.all().map(i => i.json).filter(t => t.id && t.title && t.status !== 'completed');\nconst productos = (pedido.productos || '').split(/,|\\sy\\s/).map(p => p.trim()).filter(Boolean);\n\nif (accion.startsWith('anad') || accion.startsWith('agreg') || accion.startsWith('pon')) {\n  const nuevos = productos.filter(p => !lista.some(t => normalizar(t.title) === normalizar(p)));\n  const repetidos = productos.filter(p => !nuevos.includes(p));\n  if (nuevos.length === 0) {\n    return [{ json: { accion: 'nada', mensaje: productos.length ? 'Ya estaba en la lista \"' + nombre + '\": ' + repetidos.join(', ') + '.' : 'No me han dicho qué añadir.' } }];\n  }\n  const resumen = 'Añadido a la lista \"' + nombre + '\": ' + nuevos.join(', ') + '.' + (repetidos.length ? ' Ya estaba: ' + repetidos.join(', ') + '.' : '');\n  return nuevos.map(p => ({ json: { accion: 'crear', titulo: p.charAt(0).toUpperCase() + p.slice(1), resumen } }));\n}\n\nif (accion.startsWith('quit') || accion.startsWith('borr') || accion.startsWith('tach')) {\n  const buscado = normalizar(productos[0]);\n  const encajan = buscado ? lista.filter(t => normalizar(t.title).includes(buscado)) : [];\n  if (encajan.length === 1) {\n    return [{ json: { accion: 'borrar', id: encajan[0].id, resumen: 'Quitado de la lista \"' + nombre + '\": ' + encajan[0].title + '.' } }];\n  }\n  const mensaje = encajan.length === 0\n    ? 'No he quitado nada: no está \"' + (productos[0] || '') + '\" en la lista \"' + nombre + '\".'\n    : 'No he quitado nada: encajan varios, ¿cuál? ' + encajan.map(t => t.title).join(', ') + '.';\n  return [{ json: { accion: 'nada', mensaje } }];\n}\n\n// Ver la lista\nreturn [{ json: { accion: 'nada', mensaje: lista.length ? 'En la lista \"' + nombre + '\" hay: ' + lista.map(t => t.title).join(', ') + '.' : 'La lista \"' + nombre + '\" está vacía.' } }];"
+      },
+      "name": "Decidir",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        1100,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "es-crear",
+              "leftValue": "={{ $json.accion }}",
+              "rightValue": "crear",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "¿Añadir?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1320,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "task": "={{ $('Elegir la lista').first().json.listaId }}",
+        "title": "={{ $json.titulo }}",
+        "additionalFields": {}
+      },
+      "name": "Crear en la lista",
+      "type": "n8n-nodes-base.googleTasks",
+      "typeVersion": 1,
+      "position": [
+        1540,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('Decidir').first().json.resumen }}",
+        "options": {}
+      },
+      "name": "Responder: añadido",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        -180
+      ]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "es-borrar",
+              "leftValue": "={{ $json.accion }}",
+              "rightValue": "borrar",
+              "operator": {
+                "type": "string",
+                "operation": "equals"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "¿Quitar?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        1540,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "operation": "delete",
+        "task": "={{ $('Elegir la lista').first().json.listaId }}",
+        "taskId": "={{ $json.id }}"
+      },
+      "name": "Quitar de la lista",
+      "type": "n8n-nodes-base.googleTasks",
+      "typeVersion": 1,
+      "position": [
+        1760,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $('Decidir').first().json.resumen }}",
+        "options": {}
+      },
+      "name": "Responder: quitado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1980,
+        -40
+      ]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.mensaje }}",
+        "options": {}
+      },
+      "name": "Responder: lista o aviso",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [
+        1760,
+        140
+      ]
+    }
+  ],
+  "connections": {
+    "Webhook de RoboDragón": {
+      "main": [
+        [
+          {
+            "node": "Ver tus listas",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ver tus listas": {
+      "main": [
+        [
+          {
+            "node": "Elegir la lista",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Elegir la lista": {
+      "main": [
+        [
+          {
+            "node": "¿Existe la lista?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Existe la lista?": {
+      "main": [
+        [
+          {
+            "node": "Leer la lista",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder: no existe",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Leer la lista": {
+      "main": [
+        [
+          {
+            "node": "Decidir",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Decidir": {
+      "main": [
+        [
+          {
+            "node": "¿Añadir?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Añadir?": {
+      "main": [
+        [
+          {
+            "node": "Crear en la lista",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "¿Quitar?",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Crear en la lista": {
+      "main": [
+        [
+          {
+            "node": "Responder: añadido",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "¿Quitar?": {
+      "main": [
+        [
+          {
+            "node": "Quitar de la lista",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Responder: lista o aviso",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Quitar de la lista": {
+      "main": [
+        [
+          {
+            "node": "Responder: quitado",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "timezone": "Atlantic/Canary"
+  }
+}

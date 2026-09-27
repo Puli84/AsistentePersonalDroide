@@ -125,7 +125,7 @@ Gruñón y quejica pero entrañable. Le fastidia que lo despierten. Conoce a **L
 - El audio se manda a la ESP32 al ritmo al que suena (1 s de ventaja), para que los mensajes de control no se queden en cola.
 
 ### Webs
-- **Pantalla**: `mostrar_en_pantalla` pone un título y secciones con listas (recetas, búsquedas, agenda...) encima de los ojos hasta `quitar_pantalla`. Se reparte por `/ws/estado` como `{"tipo":"pantalla","contenido":{titulo, secciones:[{titulo, elementos[], numerada}]}}`. Hoy lo dibuja la web (zona de ojos con el tamaño de una LCD de 3,5", 480x320); cuando llegue la LCD, la ESP32 dibujará los mismos datos.
+- **Pantalla**: `mostrar_en_pantalla` pone un título y secciones con listas (recetas, búsquedas, agenda...) encima de los ojos. Con `fija: true` (una receta) se queda hasta `quitar_pantalla` ("apaga la pantalla"); si no, se quita sola 60 s después de acabar la conversación. Se reparte por `/ws/estado` como `{"tipo":"pantalla","contenido":{titulo, secciones:[{titulo, elementos[], numerada}]}}`. Hoy lo dibuja la web (zona de ojos con el tamaño de una LCD de 3,5", 480x320); cuando llegue la LCD, la ESP32 dibujará los mismos datos.
 - `/`: cara con ojos. Estados reposo, escuchando y hablando; emociones contento, triste, sorprendido, enfadado y pensativo. **Tras 8 s en reposo se duerme** (ojos cerrados ‿ ‿, Zzz). Incluye chat por texto y voz.
 - `/mando.html`: cruceta para el móvil. Cada orden dura 400 ms y se repite cada 150 ms mientras se pulsa; al soltar, se para. Velocidad limitada a 70 y prioridad sobre Claude.
 - API: `POST /api/conversar {"texto"}`, `POST /api/conversar/voz` (multipart `audio`), `POST /api/olvidar`, `GET/POST /api/estado`.
@@ -147,6 +147,7 @@ En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos 
 |---|---|---|
 | `robodragon-prueba.json` | `probar_n8n` | Eco para comprobar la conexión |
 | `robodragon-telegram.json` | `mensaje_telegram` | Parámetros `para` (Daniel, Moneiba o familia) y `mensaje`. En el nodo "Elegir el chat" van los chat ID de cada uno; en "Enviar Telegram", la credencial con el token del bot. Si falta un chat, no envía y dice a quién puede escribir |
+| `robodragon-listas.json` | `listas` | Parámetros `lista` (compra, tareas, trabajo... por nombre, sin importar tildes; por defecto compra), `accion` (añadir, ver, quitar) y `productos`. Un nodo HTTP lee tus listas de Google Tasks y elige la que se llama así; si no existe, dice cuáles hay. No duplica al añadir y solo quita si encaja uno. Credencial *Google Tasks OAuth2 API* (hay que activar la Google Tasks API en el proyecto de Google) |
 | `robodragon-calendario.json` | `crear_evento_calendario` | Parámetros `titulo`, `dentro_de_minutos` **o** `inicio`, `duracion_minutos`. Calendario **Familia**. Avisos por defecto del calendario, puestos a "0 minutos antes" para que funcione como alarma |
 | `robodragon-leer-calendario.json` | `leer_calendario` | Parámetros `dias_desde_hoy` **o** `fecha`, `num_dias`. Un nodo Code convierte los eventos en líneas "domingo 28 a las 17:00: …" |
 | `robodragon-borrar-evento.json` | `borrar_evento_calendario` | Parámetros `titulo`, `dias_desde_hoy` **o** `fecha`, `hora` (opcional). Busca los eventos del día y **solo borra si encaja exactamente uno**; si no, devuelve la lista. Con `confirmar: true`. Dos nodos de Google (buscar y borrar) con credencial y calendario **Familia** |
@@ -168,6 +169,12 @@ Sustituye a WhatsApp con CallMeBot, que solo entregaba durante las 24 h siguient
   - La **powerbank** baja el voltaje a los pocos segundos: reinicios `rst:0x1 POWERON` y altavoz mudo.
   - Con un cargador de 5 V y 3 A, los servos al arrancar tumban la ESP32 (**brownout**; el servidor lo avisa).
   - **Solución que funciona ahora**: ESP32 por el **USB del PC**, servos y amplificador al **cargador**, y **GND común**. Mejor aún: condensador de 470–1000 µF en 5 V y cables cortos y gruesos.
+- **Alimentación definitiva (plan)**: todo va a 5 V por el pin **5V** de la ESP32 (el **3V3 es una salida** para el micro y el joystick; no se le mete nada). Con **2 × 18650** (baterías de litio de 3,7 V, **no son AA**; marcas buenas: Samsung, LG, Panasonic, Molicel):
+  - **Recomendado**: en **paralelo** + módulo de carga y elevador a 5 V con **USB-C** (IP5328P, 3 A). Se carga como un móvil.
+  - O en **serie** (7,4 V, el portapilas que pide el Droid-E3D) + **reductor** LM2596/XL4015 ajustado a 5,0 V con el polímetro. Se cargan sacándolas.
+  - Una batería de coche RC (7,2–7,4 V NiMH/LiPo) sirve para probar con el mismo reductor (con LiPo, no bajar de ~3 V por celda).
+  - Siempre: interruptor, condensador de 470–1000 µF, GND común y cables cortos y gruesos a servos y amplificador. Con la batería puesta, apagarla antes de enchufar el USB para programar.
+  - Duración estimada con 2 × 3.000 mAh: 8–12 h en reposo, 4–8 h moviéndose.
 - **Amplificador MAX98357A**: sus pines hacían mal contacto (volumen que va y viene, en cualquier fila de la protoboard). Ahora funciona **pinchado a medias**. Pendiente: repasar sus soldaduras o soldarle cables dupont.
 - **Micrófono**: si el log dice `saturado`, subir `GANANCIA_MIC`; si el pico sale muy bajo (~1000), bajarlo.
 - **Sensor PIR de cúpula** (el que se probó): es un interruptor de lámpara, no un sensor para microcontrolador (MOSFET con salida `L` a GND, 12 V). A 5 V deja la salida activada siempre. Aparcado. Si se quiere uno, comprar un AM312 o un HC-SR501.

@@ -19,6 +19,17 @@
     "confirmar": false
   },
   {
+    "nombre": "listas",
+    "descripcion": "Las listas de Google Tasks de la familia (se ven en el móvil): la de la compra, la de tareas, la del trabajo... Úsala cuando haya que apuntar algo en una lista, preguntar qué hay en una lista o quitar algo ya hecho o comprado. Si no dicen qué lista y es algo de comprar, usa 'compra'. Para ver una lista con varias cosas, ponla también en tu pantalla. Lo que va a una lista no se apunta en tu memoria.",
+    "url": "http://localhost:5678/webhook/robodragon-listas",
+    "parametros": {
+      "lista": "Nombre de la lista: 'compra', 'tareas', 'trabajo'... tal como te lo digan",
+      "accion": "Qué hacer: 'añadir', 'ver' o 'quitar' (quitar = ya hecho, ya comprado o ya no hace falta)",
+      "productos": "Para añadir: una o varias cosas, separadas por comas. Para quitar: una sola. Para ver: vacío"
+    },
+    "confirmar": false
+  },
+  {
     "nombre": "crear_evento_calendario",
     "descripcion": "Crea un evento en el Google Calendar de Daniel; su móvil le avisará con una notificación a esa hora. Úsala cuando pidan poner una alarma, un recordatorio o una cita para un día y hora (\"recuérdame mañana a las 5 lo del dentista\", \"ponme una alarma a las 7\"). Calcula la fecha exacta a partir de la fecha y hora actuales. Si no dicen la hora, pregúntala antes. Después di en voz alta el día y la hora exactos que has puesto.",
     "url": "http://localhost:5678/webhook/robodragon-calendario",

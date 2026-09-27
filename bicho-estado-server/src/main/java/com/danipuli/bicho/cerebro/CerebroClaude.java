@@ -103,8 +103,9 @@ public class CerebroClaude {
             - Tienes una pantalla (herramienta mostrar_en_pantalla). Úsala cuando lo que cuentes tenga \
             detalles que conviene ver y no solo oír: recetas (ingredientes y pasos), listas, horarios, \
             resultados de una búsqueda, la agenda... En voz resume en una o dos frases y deja el detalle \
-            en la pantalla ("te lo pongo en la pantalla"). Se queda puesta hasta que muestres otra cosa; \
-            usa quitar_pantalla cuando ya no haga falta o te lo pidan, para volver a enseñar tus ojos.
+            en la pantalla ("te lo pongo en la pantalla"). Márcala como fija solo si la van a ir leyendo un \
+            rato (una receta mientras cocinan); lo demás se quita solo al acabar la conversación. Si te dicen \
+            "apaga la pantalla", "quita eso" o "ya está", usa quitar_pantalla para volver a tus ojos.
             - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
             - Si una herramienta te dice que no hay robot conectado, puedes contarlo de pasada.
 
@@ -116,7 +117,7 @@ public class CerebroClaude {
             - No apuntes cosas pasajeras ni lo que ya sabes.
             - Apunta cada dato como una frase corta y clara en tercera persona \
             (por ejemplo: "La perra de Daniel se llama Luna"), en su sección: Daniel, Leo, Familia \
-            (otros familiares y amigos), Casa, Pendiente (compras y tareas por hacer), RoboDragón (sobre ti) u Otros.
+            (otros familiares y amigos), Casa, Pendiente (tareas por hacer; lo que haya que comprar va en la lista de la compra, no aquí), RoboDragón (sobre ti) u Otros.
             - Si algo cambia, usa corregir_recuerdo (no apuntes otro dato que contradiga al anterior). \
             Si algo deja de ser verdad o ya está hecho (una compra, una tarea), usa olvidar.
             - No hace falta que digas que lo has apuntado, salvo que te lo hayan pedido.
@@ -534,12 +535,15 @@ public class CerebroClaude {
         if (titulo.isEmpty() && secciones.isEmpty()) {
             return "Error: no hay nada que mostrar";
         }
+        boolean fija = Boolean.TRUE.equals(entrada.get("fija"));
         Map<String, Object> contenido = new LinkedHashMap<>();
         contenido.put("titulo", titulo);
         contenido.put("secciones", secciones);
+        contenido.put("fija", fija);
         estado.mostrarPantalla(contenido);
         acciones.add(Map.of("cmd", "pantalla", "titulo", titulo));
-        return "En pantalla: " + titulo + " (" + secciones.size() + " secciones). Se queda puesta hasta que la cambies o la quites.";
+        return "En pantalla: " + titulo + " (" + secciones.size() + " secciones). "
+                + (fija ? "Se queda puesta hasta que la quites." : "Se quitará sola al acabar la conversación.");
     }
 
     private static String recortarTexto(Object valor) {
@@ -571,8 +575,13 @@ public class CerebroClaude {
                                 .putAdditionalProperty("secciones", JsonValue.from(Map.of(
                                         "type", "array", "items", seccion,
                                         "description", "Las secciones, en orden (p. ej. Ingredientes y luego Pasos)")))
+                                .putAdditionalProperty("fija", JsonValue.from(Map.of(
+                                        "type", "boolean",
+                                        "description", "true si la van a ir leyendo un rato (una receta mientras "
+                                                + "cocinan): se queda hasta que la quites. false para lo demás (una "
+                                                + "lista, la agenda, un resultado): se quita sola al acabar la conversación")))
                                 .build())
-                        .required(List.of("titulo", "secciones"))
+                        .required(List.of("titulo", "secciones", "fija"))
                         .putAdditionalProperty("additionalProperties", JsonValue.from(false))
                         .build())
                 .build();
@@ -581,7 +590,8 @@ public class CerebroClaude {
     private Tool herramientaQuitarPantalla() {
         return Tool.builder()
                 .name("quitar_pantalla")
-                .description("Quita lo que haya en tu pantalla y vuelve a mostrar tus ojos.")
+                .description("Quita lo que haya en tu pantalla y vuelve a mostrar tus ojos. Úsala cuando digan "
+                        + "\"apaga la pantalla\", \"quita eso\", \"ya está\" o cuando lo mostrado ya no haga falta.")
                 .inputSchema(Tool.InputSchema.builder()
                         .properties(Tool.InputSchema.Properties.builder().build())
                         .putAdditionalProperty("additionalProperties", JsonValue.from(false))

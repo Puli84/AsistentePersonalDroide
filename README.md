@@ -1,6 +1,6 @@
 # RoboDragón 🐉
 
-Robot mascota de Daniel (y de Leo, su hijo de 7 años). Tiene una ESP32-S3 con ruedas, micrófono y altavoz. El cerebro es Claude, en un servidor Spring Boot que corre en el PC. Escucha su nombre, conversa con voz, se mueve, pone caras en una web, recuerda cosas, busca en internet y, a través de **n8n**, manda WhatsApps y usa Google Calendar.
+Robot mascota de Daniel (y de Leo, su hijo de 7 años). Tiene una ESP32-S3 con ruedas, micrófono y altavoz. El cerebro es Claude, en un servidor Spring Boot que corre en el PC. Escucha su nombre, conversa con voz, se mueve, pone caras en una web, recuerda cosas, busca en internet y, a través de **n8n**, manda mensajes de Telegram y usa Google Calendar.
 
 Este fichero resume **el estado actual del proyecto** para poder seguir en otra sesión.
 
@@ -15,7 +15,7 @@ Este fichero resume **el estado actual del proyecto** para poder seguir en otra 
  altavoz ◄──voz (PCM)───   :8080                                      ──► Claude: piensa + herramientas
  servos 360° ◄─órdenes──   · /ws/robot  (ESP32, web, mando del móvil) ──► OpenAI: texto→voz (TTS)
  joystick (local)          · /ws/estado (cara de la web)              ──► n8n :5678 (webhooks)
-                           · web: cara/chat (/) y mando (/mando.html)       ├─► WhatsApp (CallMeBot)
+                           · web: cara/chat (/) y mando (/mando.html)       ├─► Telegram (bot RoboDragón)
                                                                             └─► Google Calendar
 ```
 
@@ -146,10 +146,17 @@ En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos 
 | Flujo | Herramienta | Notas |
 |---|---|---|
 | `robodragon-prueba.json` | `probar_n8n` | Eco para comprobar la conexión |
-| `robodragon-whatsapp.json` | `whatsapp_a_daniel` | CallMeBot. Si n8n sale en verde con "Message queued" pero no llega (CallMeBot se queda dormido), reenviar a CallMeBot "I allow callmebot to send me messages". Llega **desde el número de CallMeBot** (+34 644 95 42 75, guardado como "RoboDragón"). Solo a Daniel. En n8n hay que poner `phone` y `apikey` (el repo lleva `PON_AQUI_...`). Otra persona necesitaría su propia apikey |
+| `robodragon-telegram.json` | `mensaje_telegram` | Parámetros `para` (Daniel, Moneiba o familia) y `mensaje`. En el nodo "Elegir el chat" van los chat ID de cada uno; en "Enviar Telegram", la credencial con el token del bot. Si falta un chat, no envía y dice a quién puede escribir |
 | `robodragon-calendario.json` | `crear_evento_calendario` | Parámetros `titulo`, `dentro_de_minutos` **o** `inicio`, `duracion_minutos`. Calendario **Familia**. Avisos por defecto del calendario, puestos a "0 minutos antes" para que funcione como alarma |
 | `robodragon-leer-calendario.json` | `leer_calendario` | Parámetros `dias_desde_hoy` **o** `fecha`, `num_dias`. Un nodo Code convierte los eventos en líneas "domingo 28 a las 17:00: …" |
 | `robodragon-borrar-evento.json` | `borrar_evento_calendario` | Parámetros `titulo`, `dias_desde_hoy` **o** `fecha`, `hora` (opcional). Busca los eventos del día y **solo borra si encaja exactamente uno**; si no, devuelve la lista. Con `confirmar: true`. Dos nodos de Google (buscar y borrar) con credencial y calendario **Familia** |
+
+### Telegram (bot de RoboDragón)
+Sustituye a WhatsApp con CallMeBot, que solo entregaba durante las 24 h siguientes a escribirle (norma de WhatsApp).
+1. En Telegram, hablar con **@BotFather** → `/newbot` → nombre (RoboDragón) y usuario (acabado en `bot`). Da el **token**. Con `/setuserpic` se le pone foto.
+2. Escribir cualquier cosa al bot nuevo (una vez; cada persona que vaya a recibir mensajes tiene que hacerlo).
+3. Sacar el **chat ID**: abrir en el navegador `https://api.telegram.org/bot<TOKEN>/getUpdates` y buscar `"chat":{"id":...}`. En un grupo: añadir el bot, escribir en el grupo y mirar lo mismo (el ID empieza por `-`).
+4. En n8n: importar `robodragon-telegram.json`; en "Enviar Telegram" crear la credencial *Telegram API* con el token; en "Elegir el chat" poner los chat ID; guardar y publicar.
 
 **Google**: proyecto *RoboDragon* en console.cloud.google.com, Google Calendar API activada, OAuth externo con Daniel como **usuario de prueba**, cliente "Aplicación web" con URI de redirección `http://localhost:5678/rest/oauth2-credential/callback`. La credencial está guardada en n8n.
 

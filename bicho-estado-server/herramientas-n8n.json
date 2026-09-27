@@ -9,10 +9,11 @@
     "confirmar": false
   },
   {
-    "nombre": "whatsapp_a_daniel",
-    "descripcion": "Envía un mensaje de WhatsApp a Daniel (solo puede escribirle a él, a nadie más). Úsala cuando te pidan mandar algo al móvil o por WhatsApp a Daniel: una nota, la lista de la compra, un recordatorio, un dato que acabas de buscar... Si te piden escribir a otra persona, di que de momento solo puedes escribirle a Daniel.",
-    "url": "http://localhost:5678/webhook/robodragon-whatsapp",
+    "nombre": "mensaje_telegram",
+    "descripcion": "Manda un mensaje de Telegram (te llega como 'RoboDragón'). Úsala cuando pidan mandar algo al móvil, por Telegram o 'mándame...': una nota, la lista de la compra, un recordatorio, algo que acabas de buscar... Por defecto es para Daniel. Si es para Moneiba o para la familia, antes de enviarlo di qué vas a mandar y a quién, y espera un sí. Si te contesta que no tiene el chat de alguien, dilo.",
+    "url": "http://localhost:5678/webhook/robodragon-telegram",
     "parametros": {
+      "para": "A quién: 'Daniel', 'Moneiba' o 'familia' (el grupo). Si no lo dicen, 'Daniel'",
       "mensaje": "El texto del mensaje, claro y completo (puede tener varias líneas). Escríbelo tú, no copies la petición tal cual."
     },
     "confirmar": false

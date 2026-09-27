@@ -1,0 +1,112 @@
+{
+  "name": "RoboDragón - Mensaje de Telegram",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "robodragon-telegram",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "name": "Webhook de RoboDragón",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [0, 0],
+      "webhookId": "robodragon-telegram"
+    },
+    {
+      "parameters": {
+        "jsCode": "// A quién puede escribir RoboDragón: pon aquí el chat ID de Telegram de cada uno.\n// (Cómo sacarlos: ver el README, sección de Telegram.) Deja '' los que aún no tengas.\nconst CHATS = {\n  daniel: 'PON_AQUI_TU_CHAT_ID',\n  moneiba: '',\n  familia: ''   // un grupo: su chat ID empieza por '-'\n};\n\nconst pedido = $input.first().json.body;\nconst para = (pedido.para || 'daniel').toLowerCase().normalize('NFD').replace(/\\p{M}/gu, '').trim();\nconst chatId = CHATS[para];\nif (!chatId || chatId.startsWith('PON_AQUI')) {\n  const disponibles = Object.keys(CHATS).filter(k => CHATS[k] && !CHATS[k].startsWith('PON_AQUI'));\n  return [{ json: { ok: false, mensaje: 'No he mandado nada: no tengo el Telegram de \"' + (pedido.para || '') + '\". Puedo escribir a: ' + (disponibles.join(', ') || 'nadie todavía') + '.' } }];\n}\nreturn [{ json: { ok: true, chatId, para, texto: '🐉 ' + (pedido.mensaje || '') } }];"
+      },
+      "name": "Elegir el chat",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [240, 0]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "id": "chat-ok",
+              "leftValue": "={{ $json.ok }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "¿Tengo su chat?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [480, 0]
+    },
+    {
+      "parameters": {
+        "chatId": "={{ $json.chatId }}",
+        "text": "={{ $json.texto }}",
+        "additionalFields": {
+          "appendAttribution": false
+        }
+      },
+      "name": "Enviar Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1.2,
+      "position": [720, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "=Telegram enviado a {{ $('Elegir el chat').first().json.para }}.",
+        "options": {}
+      },
+      "name": "Responder: enviado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [960, -100]
+    },
+    {
+      "parameters": {
+        "respondWith": "text",
+        "responseBody": "={{ $json.mensaje }}",
+        "options": {}
+      },
+      "name": "Responder: no enviado",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1.1,
+      "position": [720, 100]
+    }
+  ],
+  "connections": {
+    "Webhook de RoboDragón": {
+      "main": [[{ "node": "Elegir el chat", "type": "main", "index": 0 }]]
+    },
+    "Elegir el chat": {
+      "main": [[{ "node": "¿Tengo su chat?", "type": "main", "index": 0 }]]
+    },
+    "¿Tengo su chat?": {
+      "main": [
+        [{ "node": "Enviar Telegram", "type": "main", "index": 0 }],
+        [{ "node": "Responder: no enviado", "type": "main", "index": 0 }]
+      ]
+    },
+    "Enviar Telegram": {
+      "main": [[{ "node": "Responder: enviado", "type": "main", "index": 0 }]]
+    }
+  },
+  "settings": {
+    "timezone": "Atlantic/Canary"
+  }
+}

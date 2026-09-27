@@ -1,5 +1,7 @@
 # bicho-estado-server
 
+> ⚠️ Este README describe la **primera versión** (cara movida por xiaozhi.me vía MCP). El estado actual del proyecto (asistente propio con Claude, ESP32, n8n...) está en el [README principal](../README.md).
+
 Servidor Spring Boot con WebSocket que reparte el estado del bicho (`reposo` / `escuchando` / `hablando`) a la web de la cara. Además, se puede conectar como herramienta MCP a xiaozhi.me para que sea el propio agente (el bicho hablando de verdad) quien mueva la cara — sin recompilar el firmware.
 
 ## Dos formas de mover la cara

@@ -13,6 +13,8 @@ import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.TextWebSocketHandler;
 
 import java.io.IOException;
+import java.util.LinkedHashMap;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executors;
@@ -64,6 +66,8 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
     private volatile Estado estadoActual = Estado.REPOSO;
     private volatile String textoActual = "";
     private volatile String emocionActual = "neutral";
+    /** Lo que se ve en la pantalla (receta, lista...), o null si se ven los ojos. */
+    private volatile Map<String, Object> pantallaActual = null;
 
     // Sirve para poder ignorar un auto-reposo programado si mientras tanto llega un
     // cambio de estado más reciente.
@@ -75,6 +79,9 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
         sesiones.add(session);
         log.info("Cliente conectado al WebSocket de estado: {} (total: {})", session.getId(), sesiones.size());
         enviarASesion(session, mensajeActual());
+        if (pantallaActual != null) {
+            enviarTexto(session, mensajePantalla());
+        }
     }
 
     @Override
@@ -151,6 +158,49 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
         retransmitir();
     }
 
+    /**
+     * Muestra contenido en la pantalla del robot (receta, resultados, lista...) o, con null,
+     * vuelve a los ojos. Se manda como {"tipo":"pantalla","contenido":{...}} a todos los
+     * conectados: hoy lo dibuja la web (index.html) y mañana la LCD de la ESP32.
+     * El contenido se queda puesto hasta que se quite o se cambie.
+     */
+    public void mostrarPantalla(Map<String, Object> contenido) {
+        this.pantallaActual = contenido;
+        log.info(contenido == null ? "Pantalla: vuelven los ojos" : "Pantalla: {}", contenido == null ? "" : contenido.get("titulo"));
+        String json = mensajePantalla();
+        for (WebSocketSession sesion : sesiones) {
+            enviarTexto(sesion, json);
+        }
+    }
+
+    public Map<String, Object> getPantallaActual() {
+        return pantallaActual;
+    }
+
+    private String mensajePantalla() {
+        Map<String, Object> mensaje = new LinkedHashMap<>();
+        mensaje.put("tipo", "pantalla");
+        mensaje.put("contenido", pantallaActual);
+        try {
+            return objectMapper.writeValueAsString(mensaje);
+        } catch (IOException ex) {
+            return "{\"tipo\":\"pantalla\",\"contenido\":null}";
+        }
+    }
+
+    private void enviarTexto(WebSocketSession sesion, String json) {
+        if (!sesion.isOpen()) {
+            return;
+        }
+        try {
+            synchronized (sesion) {
+                sesion.sendMessage(new TextMessage(json));
+            }
+        } catch (IOException ex) {
+            log.warn("No se pudo enviar a la sesión {}", sesion.getId(), ex);
+        }
+    }
+
     private EstadoMensaje mensajeActual() {
         return EstadoMensaje.de(estadoActual, textoActual, emocionActual);
     }
@@ -179,7 +229,10 @@ public class EstadoWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         try {
-            sesion.sendMessage(new TextMessage(objectMapper.writeValueAsString(mensaje)));
+            String json = objectMapper.writeValueAsString(mensaje);
+            synchronized (sesion) {
+                sesion.sendMessage(new TextMessage(json));
+            }
         } catch (IOException ex) {
             log.warn("No se pudo enviar el estado a la sesión {}", sesion.getId(), ex);
         }

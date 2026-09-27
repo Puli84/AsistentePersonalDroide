@@ -105,7 +105,7 @@ También se puede compilar y subir con el `arduino-cli` que trae el IDE (FQBN `e
 ### Claude
 - Modelo `claude-sonnet-5` con `effort: low` (rapidez en voz), SDK `anthropic-java`.
 - El prompt de sistema se monta en cada turno: `personalidad.txt` + reglas técnicas (en `CerebroClaude.REGLAS`: frases cortas, sin markdown, cómo usar el cuerpo…) + fecha y hora (`Atlantic/Canary`) + ciudad + volumen + `memoria.txt`, y "te acaban de despertar" cuando corresponde.
-- **Herramientas propias**: `mover_ruedas`, `poner_cara`, `recordar`, `cambiar_volumen`, `terminar_conversacion`, más `web_search` (máximo 3 por turno) y las de n8n.
+- **Herramientas propias**: `mover_ruedas`, `poner_cara`, `recordar`, `cambiar_volumen`, `terminar_conversacion`, `mostrar_en_pantalla`, `quitar_pantalla`, más `web_search` (máximo 3 por turno) y las de n8n.
 - **Ruedas en cola**: los pasos se ejecutan uno tras otro, con un máximo de 20 s por respuesta. Una orden nueva cancela lo que estuviera haciendo.
 - Historial de 30 mensajes, recortado solo al principio de un turno. Los últimos 15 turnos se guardan en `conversacion.json` ("Olvidar conversación" en la web lo borra).
 
@@ -124,6 +124,7 @@ Gruñón y quejica pero entrañable. Le fastidia que lo despierten. Conoce a **L
 - El audio se manda a la ESP32 al ritmo al que suena (1 s de ventaja), para que los mensajes de control no se queden en cola.
 
 ### Webs
+- **Pantalla**: `mostrar_en_pantalla` pone un título y secciones con listas (recetas, búsquedas, agenda...) encima de los ojos hasta `quitar_pantalla`. Se reparte por `/ws/estado` como `{"tipo":"pantalla","contenido":{titulo, secciones:[{titulo, elementos[], numerada}]}}`. Hoy lo dibuja la web (zona de ojos con el tamaño de una LCD de 3,5", 480x320); cuando llegue la LCD, la ESP32 dibujará los mismos datos.
 - `/`: cara con ojos. Estados reposo, escuchando y hablando; emociones contento, triste, sorprendido, enfadado y pensativo. **Tras 8 s en reposo se duerme** (ojos cerrados ‿ ‿, Zzz). Incluye chat por texto y voz.
 - `/mando.html`: cruceta para el móvil. Cada orden dura 400 ms y se repite cada 150 ms mientras se pulsa; al soltar, se para. Velocidad limitada a 70 y prioridad sobre Claude.
 - API: `POST /api/conversar {"texto"}`, `POST /api/conversar/voz` (multipart `audio`), `POST /api/olvidar`, `GET/POST /api/estado`.
@@ -175,5 +176,6 @@ En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos 
   - La ESP32-S3 cabe en el compartimento trasero (medido en los STL).
 - **Programar cuando esté montado**: herramientas de Claude para mover la cabeza y los brazos; freno de seguridad con el ultrasonidos; "¿qué tienes delante?"; "acércate"/"sígueme".
 - **Ideas con n8n**: lista de la compra compartida (Sheets/Keep), resumen de buenos días (tiempo + calendario), resumen de Gmail, bot de Telegram para toda la familia (con foto y nombre propios, y grupos).
+- **LCD de 3,5"** (SPI 480x320, ILI9488/ST7796, mejor táctil; librería LovyanGFX o TFT_eSPI): dibujar en la ESP32 el mismo contenido de pantalla que ya muestra la web, y llevar los ojos a la LCD. Pines libres en el otro lado de la placa (1, 2, 3, 8, 13, 14, 21, 38–42); los 35–37 los usa la PSRAM.
 - Pasar la electrónica a una **placa perforada** (la protoboard da falsos contactos con el movimiento).
 - `bicho-estado-server/README.md` describe la primera versión con xiaozhi.me; está desfasado.

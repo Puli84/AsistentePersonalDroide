@@ -60,8 +60,22 @@
   .screen{
     background:var(--screen); border:1px solid var(--screen-line); border-radius:14px;
     padding:28px 18px; display:flex; flex-direction:column; align-items:center; gap:18px;
-    min-height:220px; justify-content:center; position:relative;
+    justify-content:center; position:relative;
+    /* Simula la LCD de 3,5" (480x320): mismo tamaño y proporción */
+    width:100%; max-width:480px; aspect-ratio:3 / 2; margin:0 auto; overflow:hidden;
   }
+
+  /* ---- Contenido en pantalla (herramienta mostrar_en_pantalla): tapa los ojos ---- */
+  .contenido{
+    position:absolute; inset:0; padding:30px 18px 14px; overflow-y:auto; display:none;
+    color:#e8f7fb; font-size:0.9rem; line-height:1.35; background:var(--screen);
+  }
+  .screen.con-contenido .contenido{ display:block; }
+  .screen.con-contenido .face, .screen.con-contenido .caption, .screen.con-contenido .zzz{ visibility:hidden; }
+  .contenido h3{ margin:0 0 8px; font-size:1.2rem; color:var(--eye-ring); }
+  .contenido h4{ margin:10px 0 4px; font-size:0.8rem; text-transform:uppercase; letter-spacing:.05em; color:var(--accent); }
+  .contenido ul, .contenido ol{ margin:0; padding-left:1.3em; }
+  .contenido li{ margin:2px 0; }
   .status{
     position:absolute; top:10px; left:14px;
     font-family: ui-monospace, monospace; font-size:0.68rem; letter-spacing:.05em; text-transform:uppercase;
@@ -219,6 +233,7 @@
       </div>
       <div class="zzz" id="zzz"><span>z</span><span>z</span><span>Z</span></div>
       <div class="caption" id="caption"></div>
+      <div class="contenido" id="contenido"></div>
     </div>
   </div>
 
@@ -280,6 +295,33 @@
   // (bicho.activacion.ventana-segundos): después de eso, hay que despertarle por su nombre.
   var MS_HASTA_DORMIRSE = 8000;
   var zzzEl = document.getElementById('zzz');
+  var pantallaEl = document.querySelector('.screen');
+  var contenidoEl = document.getElementById('contenido');
+
+  // Lo que Claude pone en la pantalla: {titulo, secciones:[{titulo, elementos[], numerada}]}, o null
+  function mostrarPantalla(c){
+    contenidoEl.textContent = '';
+    if (!c) { pantallaEl.classList.remove('con-contenido'); return; }
+    var h = document.createElement('h3');
+    h.textContent = c.titulo || '';
+    contenidoEl.appendChild(h);
+    (c.secciones || []).forEach(function(sec){
+      if (sec.titulo) {
+        var h4 = document.createElement('h4');
+        h4.textContent = sec.titulo;
+        contenidoEl.appendChild(h4);
+      }
+      var lista = document.createElement(sec.numerada ? 'ol' : 'ul');
+      (sec.elementos || []).forEach(function(texto){
+        var li = document.createElement('li');
+        li.textContent = texto;
+        lista.appendChild(li);
+      });
+      contenidoEl.appendChild(lista);
+    });
+    contenidoEl.scrollTop = 0;
+    pantallaEl.classList.add('con-contenido');
+  }
   var dormido = false;
   var temporizadorSueno = null;
 
@@ -344,6 +386,7 @@
     ws.onmessage = function(event){
       try {
         var msg = JSON.parse(event.data);
+        if (msg.tipo === 'pantalla') { mostrarPantalla(msg.contenido); return; }
         applyState(msg.estado, msg.texto, msg.emocion);
       } catch (e) { /* ignorar mensajes que no sean JSON válido */ }
     };

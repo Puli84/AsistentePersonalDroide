@@ -101,6 +101,11 @@ public class CerebroClaude {
             "silencio", "duérmete", "a dormir", "deja de escuchar", "ciérrate"), \
             se despidan ("adiós", "hasta luego", "gracias, ya está") o la conversación haya terminado \
             claramente, usa terminar_conversacion y despídete con una frase muy corta.
+            - Tienes una pantalla (herramienta mostrar_en_pantalla). Úsala cuando lo que cuentes tenga \
+            detalles que conviene ver y no solo oír: recetas (ingredientes y pasos), listas, horarios, \
+            resultados de una búsqueda, la agenda... En voz resume en una o dos frases y deja el detalle \
+            en la pantalla ("te lo pongo en la pantalla"). Se queda puesta hasta que muestres otra cosa; \
+            usa quitar_pantalla cuando ya no haga falta o te lo pidan, para volver a enseñar tus ojos.
             - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
             - Si una herramienta te dice que no hay robot conectado, puedes contarlo de pasada.
 
@@ -190,7 +195,7 @@ public class CerebroClaude {
         this.robot = robot;
         this.n8n = n8n;
         this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
-                herramientaVolumen(), herramientaTerminar());
+                herramientaVolumen(), herramientaTerminar(), herramientaPantalla(), herramientaQuitarPantalla());
         cargarConversacion();
         if (!configurado) {
             log.warn("Falta la API key de Anthropic: ponla en src/main/resources/secrets.properties (bicho.anthropic.api-key)");
@@ -443,6 +448,12 @@ public class CerebroClaude {
             case "poner_cara" -> ponerCara(entrada, acciones);
             case "recordar" -> recordar(entrada);
             case "cambiar_volumen" -> cambiarVolumen(entrada, acciones);
+            case "mostrar_en_pantalla" -> mostrarEnPantalla(entrada, acciones);
+            case "quitar_pantalla" -> {
+                estado.mostrarPantalla(null);
+                acciones.add(Map.of("cmd", "pantalla", "accion", "quitar"));
+                yield "Pantalla quitada: vuelven a verse tus ojos.";
+            }
             case "terminar_conversacion" -> {
                 robot.terminarConversacion();
                 acciones.add(Map.of("cmd", "terminar_conversacion"));
@@ -497,6 +508,96 @@ public class CerebroClaude {
         estado.ponerEmocion(emocion);
         acciones.add(Map.of("cmd", "cara", "emocion", emocion));
         return "Cara puesta: " + emocion;
+    }
+
+    /** Límites de lo que cabe en la pantalla (480x320), por si Claude se pasa. */
+    private static final int MAX_SECCIONES = 6;
+    private static final int MAX_ELEMENTOS = 25;
+    private static final int MAX_CARACTERES = 300;
+
+    /**
+     * Pone contenido en la pantalla del robot: {titulo, secciones: [{titulo, elementos[], numerada}]}.
+     * Se limpia y se recorta aquí, para que lo que llegue a la web (o a la LCD) sea siempre válido.
+     */
+    private String mostrarEnPantalla(Map<String, Object> entrada, List<Map<String, Object>> acciones) {
+        String titulo = recortarTexto(entrada.get("titulo"));
+        List<Map<String, Object>> secciones = new ArrayList<>();
+        if (entrada.get("secciones") instanceof List<?> lista) {
+            for (Object o : lista) {
+                if (!(o instanceof Map<?, ?> sec) || secciones.size() >= MAX_SECCIONES) {
+                    continue;
+                }
+                List<String> elementos = new ArrayList<>();
+                if (sec.get("elementos") instanceof List<?> els) {
+                    for (Object e : els) {
+                        if (elementos.size() < MAX_ELEMENTOS && e != null && !String.valueOf(e).isBlank()) {
+                            elementos.add(recortarTexto(e));
+                        }
+                    }
+                }
+                Map<String, Object> limpia = new LinkedHashMap<>();
+                limpia.put("titulo", recortarTexto(sec.get("titulo")));
+                limpia.put("elementos", elementos);
+                limpia.put("numerada", Boolean.TRUE.equals(sec.get("numerada")));
+                secciones.add(limpia);
+            }
+        }
+        if (titulo.isEmpty() && secciones.isEmpty()) {
+            return "Error: no hay nada que mostrar";
+        }
+        Map<String, Object> contenido = new LinkedHashMap<>();
+        contenido.put("titulo", titulo);
+        contenido.put("secciones", secciones);
+        estado.mostrarPantalla(contenido);
+        acciones.add(Map.of("cmd", "pantalla", "titulo", titulo));
+        return "En pantalla: " + titulo + " (" + secciones.size() + " secciones). Se queda puesta hasta que la cambies o la quites.";
+    }
+
+    private static String recortarTexto(Object valor) {
+        String t = valor == null ? "" : String.valueOf(valor).strip();
+        return t.length() > MAX_CARACTERES ? t.substring(0, MAX_CARACTERES) + "…" : t;
+    }
+
+    private Tool herramientaPantalla() {
+        Map<String, Object> seccion = Map.of(
+                "type", "object",
+                "properties", Map.of(
+                        "titulo", Map.of("type", "string",
+                                "description", "Encabezado de la sección, p. ej. 'Ingredientes' o 'Pasos' (puede ir vacío)"),
+                        "elementos", Map.of("type", "array", "items", Map.of("type", "string"),
+                                "description", "Las líneas de la sección, cortas y claras (un ingrediente, un paso, un resultado...)"),
+                        "numerada", Map.of("type", "boolean",
+                                "description", "true para numerarlas (pasos de una receta), false para viñetas")),
+                "required", List.of("titulo", "elementos", "numerada"),
+                "additionalProperties", false);
+        return Tool.builder()
+                .name("mostrar_en_pantalla")
+                .description("Muestra contenido en tu pantalla (sustituye a tus ojos hasta que la quites): un título y "
+                        + "secciones con listas. Ideal para recetas, listas, horarios, resultados de búsquedas o la agenda.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("titulo", JsonValue.from(Map.of(
+                                        "type", "string", "description", "Título grande, p. ej. 'Lentejas con chorizo'")))
+                                .putAdditionalProperty("secciones", JsonValue.from(Map.of(
+                                        "type", "array", "items", seccion,
+                                        "description", "Las secciones, en orden (p. ej. Ingredientes y luego Pasos)")))
+                                .build())
+                        .required(List.of("titulo", "secciones"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaQuitarPantalla() {
+        return Tool.builder()
+                .name("quitar_pantalla")
+                .description("Quita lo que haya en tu pantalla y vuelve a mostrar tus ojos.")
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder().build())
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
     }
 
     private Tool herramientaRuedas() {

@@ -29,7 +29,6 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.NoSuchFileException;
 import java.nio.file.Path;
-import java.nio.file.StandardOpenOption;
 import java.time.ZoneId;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
@@ -114,10 +113,12 @@ public class CerebroClaude {
             herramienta recordar.
             - Úsala cuando te cuenten algo duradero e importante: nombres (familia, amigos, mascotas), \
             gustos, fechas, planes, cosas de la casa, o cuando te digan "acuérdate de...".
-            - No apuntes cosas pasajeras ni lo que ya sabes. Si algo cambia, apunta el dato nuevo \
-            diciendo que corrige al anterior.
+            - No apuntes cosas pasajeras ni lo que ya sabes.
             - Apunta cada dato como una frase corta y clara en tercera persona \
-            (por ejemplo: "La perra de Daniel se llama Luna").
+            (por ejemplo: "La perra de Daniel se llama Luna"), en su sección: Daniel, Leo, Familia \
+            (otros familiares y amigos), Casa, Pendiente (compras y tareas por hacer), RoboDragón (sobre ti) u Otros.
+            - Si algo cambia, usa corregir_recuerdo (no apuntes otro dato que contradiga al anterior). \
+            Si algo deja de ser verdad o ya está hecho (una compra, una tarea), usa olvidar.
             - No hace falta que digas que lo has apuntado, salvo que te lo hayan pedido.
             """;
 
@@ -130,7 +131,7 @@ public class CerebroClaude {
 
     private final AnthropicClient client;
     private final Path ficheroPersonalidad;
-    private final Path ficheroMemoria;
+    private final MemoriaLargoPlazo memoria;
     private final Path ficheroConversacion;
     private final ObjectMapper mapper = new ObjectMapper();
     private final ZoneId zonaHoraria;
@@ -185,9 +186,9 @@ public class CerebroClaude {
         this.zonaHoraria = ZoneId.of(zonaHoraria);
         this.ciudad = ciudad == null ? "" : ciudad.trim();
         this.maxBusquedas = maxBusquedas;
-        this.ficheroMemoria = Path.of(ficheroMemoria).toAbsolutePath();
+        this.memoria = new MemoriaLargoPlazo(Path.of(ficheroMemoria).toAbsolutePath());
         this.ficheroConversacion = Path.of(ficheroConversacion).toAbsolutePath();
-        log.info("Memoria a largo plazo: {}", this.ficheroMemoria);
+        log.info("Memoria a largo plazo: {}", this.memoria.fichero());
         this.duracionMaxMs = duracionMaxMs;
         this.velocidadMax = velocidadMax;
         this.maxMsMovimientoTurno = maxSegundosPorRespuesta * 1000;
@@ -195,6 +196,7 @@ public class CerebroClaude {
         this.robot = robot;
         this.n8n = n8n;
         this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
+                herramientaCorregirRecuerdo(), herramientaOlvidar(),
                 herramientaVolumen(), herramientaTerminar(), herramientaPantalla(), herramientaQuitarPantalla());
         cargarConversacion();
         if (!configurado) {
@@ -370,33 +372,18 @@ public class CerebroClaude {
 
     // ------------------------------------------------------------------ memoria
 
-    /** Lo que el bicho recuerda para siempre, para meterlo en el prompt de sistema. */
+    /** Lo que el bicho recuerda para siempre, por secciones, para meterlo en el prompt de sistema. */
     private String seccionMemoria() {
-        String memoria = leerFichero(ficheroMemoria);
-        if (memoria.isEmpty()) {
+        String contenido = memoria.contenido();
+        if (contenido.isEmpty()) {
             return "";
         }
-        return "\nLo que recuerdas de conversaciones anteriores (tu memoria a largo plazo):\n" + memoria + "\n";
+        return "\nLo que recuerdas de conversaciones anteriores (tu memoria a largo plazo, por secciones):\n"
+                + contenido + "\n";
     }
 
-    private String recordar(Map<String, Object> entrada) {
-        String dato = String.valueOf(entrada.get("dato")).strip().replaceAll("\\s+", " ");
-        if (dato.isEmpty() || dato.equals("null")) {
-            return "Error: no hay nada que recordar";
-        }
-        String linea = "- " + dato;
-        try {
-            if (leerFichero(ficheroMemoria).lines().anyMatch(l -> l.strip().equalsIgnoreCase(linea))) {
-                return "Eso ya lo tenías apuntado.";
-            }
-            Files.writeString(ficheroMemoria, linea + System.lineSeparator(), StandardCharsets.UTF_8,
-                    StandardOpenOption.CREATE, StandardOpenOption.APPEND);
-            log.info("Nuevo recuerdo: {}", dato);
-            return "Apuntado en tu memoria: " + dato;
-        } catch (IOException ex) {
-            log.warn("No se pudo escribir en {}: {}", ficheroMemoria, ex.getMessage());
-            return "Error: no se ha podido guardar el recuerdo";
-        }
+    private static String texto(Object valor) {
+        return valor == null ? "" : String.valueOf(valor);
     }
 
     /**
@@ -446,7 +433,9 @@ public class CerebroClaude {
         return switch (uso.name()) {
             case "mover_ruedas" -> moverRuedas(entrada, acciones);
             case "poner_cara" -> ponerCara(entrada, acciones);
-            case "recordar" -> recordar(entrada);
+            case "recordar" -> memoria.recordar(texto(entrada.get("seccion")), texto(entrada.get("dato")));
+            case "corregir_recuerdo" -> memoria.corregir(texto(entrada.get("buscar")), texto(entrada.get("nuevo")));
+            case "olvidar" -> memoria.olvidar(texto(entrada.get("buscar")));
             case "cambiar_volumen" -> cambiarVolumen(entrada, acciones);
             case "mostrar_en_pantalla" -> mostrarEnPantalla(entrada, acciones);
             case "quitar_pantalla" -> {
@@ -662,15 +651,58 @@ public class CerebroClaude {
         return Tool.builder()
                 .name("recordar")
                 .description("Apunta un dato importante en tu memoria a largo plazo para no olvidarlo nunca, "
-                        + "aunque se reinicie tu cerebro. Un dato por llamada.")
+                        + "aunque se reinicie tu cerebro. Un dato por llamada, en su sección.")
                 .strict(true)
                 .inputSchema(Tool.InputSchema.builder()
                         .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("seccion", JsonValue.from(Map.of(
+                                        "type", "string",
+                                        "enum", MemoriaLargoPlazo.SECCIONES,
+                                        "description", "Dónde apuntarlo")))
                                 .putAdditionalProperty("dato", JsonValue.from(Map.of(
                                         "type", "string",
                                         "description", "El dato, como una frase corta en tercera persona")))
                                 .build())
-                        .required(List.of("dato"))
+                        .required(List.of("seccion", "dato"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaCorregirRecuerdo() {
+        return Tool.builder()
+                .name("corregir_recuerdo")
+                .description("Cambia un dato de tu memoria que ya no es correcto por su versión nueva. Solo lo "
+                        + "cambia si encaja exactamente un recuerdo con lo que buscas.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("buscar", JsonValue.from(Map.of(
+                                        "type", "string",
+                                        "description", "Un trozo del recuerdo que hay que cambiar, tal como aparece en tu memoria")))
+                                .putAdditionalProperty("nuevo", JsonValue.from(Map.of(
+                                        "type", "string",
+                                        "description", "El dato correcto, como una frase corta en tercera persona")))
+                                .build())
+                        .required(List.of("buscar", "nuevo"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaOlvidar() {
+        return Tool.builder()
+                .name("olvidar")
+                .description("Borra un dato de tu memoria que ya no es verdad o ya no hace falta (una compra ya "
+                        + "hecha, una tarea terminada...). Solo lo borra si encaja exactamente un recuerdo.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("buscar", JsonValue.from(Map.of(
+                                        "type", "string",
+                                        "description", "Un trozo del recuerdo que hay que borrar, tal como aparece en tu memoria")))
+                                .build())
+                        .required(List.of("buscar"))
                         .putAdditionalProperty("additionalProperties", JsonValue.from(false))
                         .build())
                 .build();

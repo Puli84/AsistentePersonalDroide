@@ -29,7 +29,7 @@ Un turno de conversación: la ESP32 detecta voz → la envía → STT → si dic
 bicho-estado-server/         Servidor Spring Boot 3.3 (Java 17). Se abre en Eclipse/STS.
   personalidad.txt           Personalidad (system prompt). Se relee en cada turno: editar sin reiniciar.
   herramientas-n8n.json      Automatizaciones de n8n que Claude puede usar. Se relee en cada turno.
-  memoria.txt                (no en git) Memoria a largo plazo que apunta Claude con "recordar".
+  memoria.txt                (no en git) Memoria a largo plazo por secciones (# Daniel, # Leo, # Familia, # Casa, # Pendiente...). Editable a mano.
   conversacion.json          (no en git) Conversación reciente, para seguir tras reiniciar.
   src/main/resources/
     application.properties   Configuración (modelos, zona horaria, límites...).
@@ -105,7 +105,8 @@ También se puede compilar y subir con el `arduino-cli` que trae el IDE (FQBN `e
 ### Claude
 - Modelo `claude-sonnet-5` con `effort: low` (rapidez en voz), SDK `anthropic-java`.
 - El prompt de sistema se monta en cada turno: `personalidad.txt` + reglas técnicas (en `CerebroClaude.REGLAS`: frases cortas, sin markdown, cómo usar el cuerpo…) + fecha y hora (`Atlantic/Canary`) + ciudad + volumen + `memoria.txt`, y "te acaban de despertar" cuando corresponde.
-- **Herramientas propias**: `mover_ruedas`, `poner_cara`, `recordar`, `cambiar_volumen`, `terminar_conversacion`, `mostrar_en_pantalla`, `quitar_pantalla`, más `web_search` (máximo 3 por turno) y las de n8n.
+- **Memoria** (`MemoriaLargoPlazo`): `memoria.txt` por secciones, que va entera en el prompt (solo las secciones con algo). Herramientas `recordar` (en su sección), `corregir_recuerdo` y `olvidar`; estas dos solo actúan si encaja exactamente un recuerdo (sin importar tildes ni mayúsculas). Si crece a cientos de datos o se quiere un diario, pasar a SQLite con búsqueda.
+- **Herramientas propias**: `mover_ruedas`, `poner_cara`, `recordar`, `corregir_recuerdo`, `olvidar`, `cambiar_volumen`, `terminar_conversacion`, `mostrar_en_pantalla`, `quitar_pantalla`, más `web_search` (máximo 3 por turno) y las de n8n.
 - **Ruedas en cola**: los pasos se ejecutan uno tras otro, con un máximo de 20 s por respuesta. Una orden nueva cancela lo que estuviera haciendo.
 - Historial de 30 mensajes, recortado solo al principio de un turno. Los últimos 15 turnos se guardan en `conversacion.json` ("Olvidar conversación" en la web lo borra).
 
@@ -145,7 +146,7 @@ En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos 
 | Flujo | Herramienta | Notas |
 |---|---|---|
 | `robodragon-prueba.json` | `probar_n8n` | Eco para comprobar la conexión |
-| `robodragon-whatsapp.json` | `whatsapp_a_daniel` | CallMeBot. Llega **desde el número de CallMeBot** (+34 644 95 42 75, guardado como "RoboDragón"). Solo a Daniel. En n8n hay que poner `phone` y `apikey` (el repo lleva `PON_AQUI_...`). Otra persona necesitaría su propia apikey |
+| `robodragon-whatsapp.json` | `whatsapp_a_daniel` | CallMeBot. Si n8n sale en verde con "Message queued" pero no llega (CallMeBot se queda dormido), reenviar a CallMeBot "I allow callmebot to send me messages". Llega **desde el número de CallMeBot** (+34 644 95 42 75, guardado como "RoboDragón"). Solo a Daniel. En n8n hay que poner `phone` y `apikey` (el repo lleva `PON_AQUI_...`). Otra persona necesitaría su propia apikey |
 | `robodragon-calendario.json` | `crear_evento_calendario` | Parámetros `titulo`, `dentro_de_minutos` **o** `inicio`, `duracion_minutos`. Calendario **Familia**. Avisos por defecto del calendario, puestos a "0 minutos antes" para que funcione como alarma |
 | `robodragon-leer-calendario.json` | `leer_calendario` | Parámetros `dias_desde_hoy` **o** `fecha`, `num_dias`. Un nodo Code convierte los eventos en líneas "domingo 28 a las 17:00: …" |
 | `robodragon-borrar-evento.json` | `borrar_evento_calendario` | Parámetros `titulo`, `dias_desde_hoy` **o** `fecha`, `hora` (opcional). Busca los eventos del día y **solo borra si encaja exactamente uno**; si no, devuelve la lista. Con `confirmar: true`. Dos nodos de Google (buscar y borrar) con credencial y calendario **Familia** |

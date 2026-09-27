@@ -57,7 +57,7 @@ public class HerramientasN8n {
     /** Las herramientas propias del robot: una de n8n no puede llamarse igual. */
     private static final Set<String> NOMBRES_RESERVADOS =
             Set.of("mover_ruedas", "poner_cara", "recordar", "cambiar_volumen", "terminar_conversacion", "web_search",
-                    "mostrar_en_pantalla", "quitar_pantalla");
+                    "mostrar_en_pantalla", "quitar_pantalla", "corregir_recuerdo", "olvidar");
 
     /** Lo máximo de la respuesta de n8n que se le pasa a Claude. */
     private static final int MAX_CARACTERES_RESPUESTA = 3000;

@@ -24,6 +24,7 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArraySet;
 import java.util.concurrent.Executors;
@@ -49,9 +50,16 @@ import java.util.concurrent.TimeUnit;
  *   texto   { "tipo": "fin_audio" }
  *   texto   { "tipo": "reproduccion_fin" }     ← cuando termina de decir la respuesta
  *   texto   { "tipo": "hola", "volumen": 70 }  ← al conectar
+ *   texto   { "tipo": "distancia", "cm": 42 }   ← respuesta a "distancia" (-1 nada a la vista, -2 sin sensor)
+ *   texto   { "tipo": "obstaculo", "cm": 12 }   ← ha frenado sola: iba hacia delante y tenía algo encima
+ *   texto   { "tipo": "seguir_fin", "motivo": "perdida" }  ← ha dejado de seguir la mano
+ *   texto   { "tipo": "tacto", "gesto": "caricia" | "cosquillas" }  ← le han tocado la cabeza
  *
  * Servidor → ESP32, otros comandos:
  *   { "cmd": "volumen", "valor": 80 }
+ *   { "cmd": "cabeza", "grados": 30 }      ← 0 = al frente, positivo = a su izquierda
+ *   { "cmd": "distancia" }                 ← pide lo que mide el ultrasonidos
+ *   { "cmd": "seguir", "activo": true }    ← seguir la mano (la ESP32 lo hace sola)
  *
  * Servidor → esa ESP32, la respuesta hablada:
  *   texto   { "tipo": "audio_inicio", "sample_rate": 24000 }
@@ -113,6 +121,9 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
     private final List<ScheduledFuture<?>> movimientosPendientes = new ArrayList<>();
     /** Cuándo acaba el último movimiento en cola (0 = ruedas paradas). */
     private long finMovimientos = 0;
+
+    /** Medida del ultrasonidos que se ha pedido a la ESP32 y aún no ha llegado. */
+    private volatile CompletableFuture<Integer> distanciaPendiente;
 
     public RobotWebSocketHandler(ApplicationEventPublisher eventos, EstadoWebSocketHandler estado,
                                  @Value("${bicho.ruedas.velocidad-max:70}") long velocidadMax) {
@@ -209,6 +220,24 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
                 }
             }
             case "mando" -> ordenDelMando(json);
+            case "distancia" -> {
+                CompletableFuture<Integer> pendiente = distanciaPendiente;
+                if (pendiente != null) {
+                    pendiente.complete(json.path("cm").asInt(-2));
+                }
+            }
+            case "tacto" -> {
+                String gesto = json.path("gesto").asText("");
+                log.info("La ESP32 nota en la cabeza: {}", gesto);
+                eventos.publishEvent(new TactoRecibido(session, gesto));
+            }
+            case "seguir_fin" -> log.info("La ESP32 ha dejado de seguir la mano ({})",
+                    json.path("motivo").asText());
+            case "obstaculo" -> {
+                // La ESP32 ya ha frenado sola; aquí se tiran los movimientos que quedaban en cola
+                log.info("La ESP32 ha frenado: obstáculo a {} cm", json.path("cm").asInt());
+                cancelarMovimientos();
+            }
             default -> log.info("Mensaje de /ws/robot sin tipo conocido: {}", message.getPayload());
         }
     }
@@ -296,6 +325,39 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
             enviarComando(Map.of("cmd", "ruedas", "accion", "parar", "velocidad", 0, "duracion_ms", 0));
         }
         finMovimientos = 0;
+    }
+
+    /**
+     * Pide al ultrasonidos lo que tiene delante. Antes espera a que acaben los movimientos en
+     * cola (p. ej. girar la cabeza para mirar a un lado), para medir hacia donde ya mira.
+     *
+     * @return centímetros, -1 si no ve nada, -2 si el sensor no contesta, o null si no hay
+     *         ESP32 conectada o no responde
+     */
+    public Integer pedirDistancia() {
+        if (!hayRobotConectado()) {
+            return null;
+        }
+        long espera = Math.min(5000, finMovimientos - System.currentTimeMillis());
+        try {
+            if (espera > 0) {
+                // y un poco más, para que el sensor haga varias medidas ya quieto
+                Thread.sleep(espera + 300);
+            }
+            CompletableFuture<Integer> pendiente = new CompletableFuture<>();
+            distanciaPendiente = pendiente;
+            String json = aJson(Map.of("cmd", "distancia"));
+            sesiones.stream().filter(this::esEsp32).forEach(s -> enviar(s, new TextMessage(json)));
+            return pendiente.get(2, TimeUnit.SECONDS);
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            return null;
+        } catch (Exception ex) {
+            log.warn("La ESP32 no ha contestado la distancia a tiempo");
+            return null;
+        } finally {
+            distanciaPendiente = null;
+        }
     }
 
     @PreDestroy
@@ -407,6 +469,10 @@ public class RobotWebSocketHandler extends AbstractWebSocketHandler {
      * @param msDesdeRespuesta ms que llevaba callado el robot cuando empezaste a hablar
      *                         (Long.MAX_VALUE si no venía de una respuesta, o si se despidió)
      */
+    /** Evento: le han tocado la cabeza (caricia o cosquillas). */
+    public record TactoRecibido(WebSocketSession sesion, String gesto) {
+    }
+
     public record AudioEsp32Recibido(WebSocketSession sesion, byte[] pcm16k, boolean escucha,
                                      long msDesdeRespuesta) {
     }

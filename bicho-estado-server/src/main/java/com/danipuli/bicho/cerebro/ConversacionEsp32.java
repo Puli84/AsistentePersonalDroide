@@ -64,6 +64,29 @@ public class ConversacionEsp32 {
         hilo.submit(() -> atender(evento));
     }
 
+    /** Lo que se le cuenta a Claude cuando le tocan la cabeza (no es algo que le digan). */
+    private static final java.util.Map<String, String> TACTO = java.util.Map.of(
+            "caricia", "(Nadie te habla: te están acariciando la cabeza.)",
+            "cosquillas", "(Nadie te habla: te están haciendo cosquillas en la cabeza.)");
+
+    @EventListener
+    public void alTocar(RobotWebSocketHandler.TactoRecibido evento) {
+        String texto = TACTO.get(evento.gesto());
+        if (texto == null) {
+            return;
+        }
+        hilo.submit(() -> {
+            AsistenteService.Resultado r = asistente.turnoDeTexto(texto, "pcm", false);
+            if (r.error() != null || r.audio() == null) {
+                log.info("Sin reacción al tacto: {}", r.error() != null ? r.error() : r.avisoVoz());
+                robot.enviarIgnorado(evento.sesion());
+                return;
+            }
+            log.info("ESP32 — {} → bicho: '{}'", evento.gesto(), r.texto());
+            robot.enviarAudio(evento.sesion(), r.audio(), SAMPLE_RATE_VOZ);
+        });
+    }
+
     private void atender(RobotWebSocketHandler.AudioEsp32Recibido evento) {
         byte[] wav = aWav(evento.pcm16k(), SAMPLE_RATE_MICRO);
         diagnosticar(evento.pcm16k(), wav);

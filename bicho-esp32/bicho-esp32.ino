@@ -2,9 +2,9 @@
  * bicho-esp32 — el cuerpo del bicho (sustituye al firmware de xiaozhi)
  *
  * La ESP32 no piensa: graba tu voz (cuando oye "RoboDragón", o mientras mantienes pulsado
- * BOOT o la palanca del joystick), se la manda al servidor Spring Boot (/ws/robot),
- * reproduce la respuesta hablada que le devuelve y mueve las ruedas cuando el servidor se
- * lo pide. Con el joystick también se puede conducir a mano.
+ * BOOT), se la manda al servidor Spring Boot (/ws/robot), reproduce la respuesta hablada que
+ * le devuelve y mueve las ruedas y la cabeza cuando el servidor se lo pide. Los "ojos" son un
+ * ultrasonidos: mide lo que tiene delante y frena solo si va a chocar.
  *
  * Placa: ESP32-S3 (N16R8). En Arduino IDE:
  *   Herramientas → Placa: "ESP32S3 Dev Module"
@@ -41,12 +41,13 @@
 #define PIN_RUEDA_DER 18
 // Botón para hablar: el BOOT de la propia placa
 #define PIN_BOTON     0
-// Joystick de PS2 (alimentado a 3V3, NO a 5V): palanca para conducir, pulsarla para hablar.
-// VRx y VRy tienen que ir a pines del ADC1 (GPIO 1..10): el ADC2 no funciona con la wifi.
-// El botón puede ir en cualquier pin normal (no en el 46: la placa lo mira al arrancar).
-#define PIN_JOY_X     9
-#define PIN_JOY_Y     10
-#define PIN_JOY_SW    11
+// Servo de 180° de la cabeza (5 V aparte, como las ruedas)
+#define PIN_CABEZA    9
+// Ultrasonidos RCWL-9610 (a 3V3: así el Echo no pasa de 3,3 V y va directo a la ESP32)
+#define PIN_US_TRIG   10
+#define PIN_US_ECHO   11
+// Tacto: un cable a una chapa o cinta de cobre en la cabeza (pin táctil de la ESP32-S3)
+#define PIN_TACTO     14
 
 // ---------------------------------------------------------------- ajustes
 const int MIC_HZ = 16000;              // lo que espera el servidor
@@ -78,16 +79,56 @@ const int PARADA_DER_US = 1500;
 const bool INVERTIR_IZQ = false;
 const bool INVERTIR_DER = false;
 const unsigned long MAX_MOVIMIENTO_MS = 3000;   // seguridad, además del límite del servidor
+// Para que vaya recto: % de velocidad de cada rueda (la más rápida se baja un poco). Se ajusta
+// desde el Monitor Serie con "izq 90" o "der 90" y se guarda en la placa.
+int potenciaIzq = 50;
+int potenciaDer = 100;
 
-// Joystick. Mientras lo mueves, manda él: se ignoran los movimientos que pida el servidor.
-// Para comprobar los ejes, escribe "j" en el Monitor Serie y mueve la palanca.
-// Si al empujar hacia delante va hacia atrás, cambia INVERTIR_JOY_Y; si gira al revés, INVERTIR_JOY_X.
-const bool USAR_JOYSTICK = true;
-const bool INVERTIR_JOY_X = false;
-const bool INVERTIR_JOY_Y = false;
-const int VELOCIDAD_MAX_JOYSTICK = 70;          // como el límite del servidor
-const float ZONA_MUERTA_JOY = 0.15;             // 15% alrededor del centro no hace nada
-const float GIRO_JOY = 0.7;                     // cuánto pesa girar frente a avanzar
+// Cabeza. El servidor manda el giro en grados: 0 = al frente, positivo = a su izquierda.
+// Si con "q" (izquierda) gira a la derecha, cambia INVERTIR_CABEZA. Si al centrarla ("c") no
+// mira recta, mejor recolocar el brazo del servo; para retoques pequeños, CENTRO_CABEZA.
+const int CENTRO_CABEZA = 90;                   // ángulo del servo con la cabeza al frente
+const int GIRO_MAX_CABEZA = 70;                 // lo más que gira a cada lado
+const bool INVERTIR_CABEZA = false;
+const int PULSO_MIN_US = 500;                   // pulso del servo a 0° y a 180°
+const int PULSO_MAX_US = 2400;
+const float GRADOS_POR_PASO = 3;                // giro suave: 3° cada 15 ms (~200°/s)
+// Los servos baratos no paran igual llegando por un lado que por el otro (holgura). Para que la
+// cabeza quede siempre en el mismo sitio, llega siempre desde la izquierda: si viene de la
+// derecha, se pasa estos grados y vuelve.
+const float GRADOS_HOLGURA = 6;
+// Mientras habla, mueve la cabeza un poco cada rato para parecer más vivo (0 = no la mueve)
+const int GIRO_AL_HABLAR = 15;                  // grados a cada lado de donde está mirando
+
+// Ultrasonidos: mide continuamente. Si va hacia delante y hay algo más cerca que esto, frena.
+const int DISTANCIA_FRENO_CM = 12;
+const int DISTANCIA_MAX_CM = 400;               // más lejos = no ve nada
+
+// Tacto. Al arrancar mide cómo está sin tocar (no la toques mientras arranca). Para ver los
+// valores, escribe "k" en el Monitor Serie: al tocar tienen que subir claramente.
+const float TACTO_TOCADO = 1.15;                // tocando = 15% más que sin tocar
+const float TACTO_SUELTO = 1.08;                // y se suelta por debajo del 8% (para no dar saltos)
+const unsigned long TACTO_CARICIA_MS = 700;     // mantener la mano este rato = caricia
+const unsigned long TACTO_TOQUE_MAX_MS = 400;   // un toque más corto que esto cuenta como toquecito
+const int TACTO_TOQUES_COSQUILLAS = 3;          // tantos toquecitos seguidos = cosquillas
+const unsigned long TACTO_VENTANA_MS = 1500;    // ...en este tiempo
+const unsigned long TACTO_ENTRE_AVISOS_MS = 5000;  // como mucho una reacción cada 5 s
+
+// Seguir la mano: se queda a esta distancia, avanzando o retrocediendo
+const int SEGUIR_DISTANCIA_CM = 20;
+const int SEGUIR_MARGEN_CM = 4;                 // +-4 cm alrededor: quieto
+const int SEGUIR_ALCANCE_CM = 40;               // más lejos de esto ya no es la mano
+const int SEGUIR_SALTO_CM = 15;                 // si la distancia cambia de golpe tanto, es otra cosa
+const unsigned long SEGUIR_SIN_ACERCARSE_MS = 1500;  // avanzando sin acercarse: es el suelo, no la mano
+const int SEGUIR_VEL_MIN = 35;                  // por debajo las orugas casi no se mueven
+const int SEGUIR_VEL_MAX = 60;
+const unsigned long SEGUIR_PERDIDA_MS = 5000;   // sin ver la mano este rato, deja de seguir
+const unsigned long SEGUIR_MAX_MS = 60000;      // como mucho un minuto seguido
+// Si la pierde, la busca girando la cabeza; si la ve de lado, gira el cuerpo hacia ella
+const int SEGUIR_VEL_GIRO = 25;
+const int SEGUIR_CABEZA_LADO = 10;              // con la cabeza girada más de esto, gira el cuerpo
+const float SEGUIR_CABEZA_PASO = 3;             // grados que vuelve la cabeza al centro cada 100 ms al girar
+const unsigned long SEGUIR_ESPERA_BUSCAR_MS = 450;   // en cada sitio de la búsqueda: llegar y medir
 
 // ---------------------------------------------------------------- estado
 // GRABANDO = con el botón; OYENDO = grabando una frase que ha oído ella sola
@@ -110,6 +151,7 @@ bool micActivo = false;
 bool botonAntes = false;           // para detectar solo el momento de pulsar
 unsigned long inicioModo = 0;
 unsigned long finMovimiento = 0;   // 0 = ruedas paradas
+bool avanzando = false;            // las dos ruedas hacia delante (para frenar ante un obstáculo)
 
 // ================================================================ audio
 
@@ -292,16 +334,20 @@ void pararRuedas() {
   ledcWrite(PIN_RUEDA_IZQ, 0);
   ledcWrite(PIN_RUEDA_DER, 0);
   finMovimiento = 0;
+  avanzando = false;
 }
 
 // Velocidad de cada rueda por separado, de -100 (atrás) a +100 (adelante); 0 = sin pulsos (quieta)
 void escribirRuedas(int velIzq, int velDer) {
-  int dIzq = constrain(velIzq, -100, 100) * 5;   // 100% = ±500 us sobre la parada
-  int dDer = constrain(velDer, -100, 100) * 5;
+  int dIzq = constrain(velIzq, -100, 100) * 5 * potenciaIzq / 100;   // 100% = ±500 us sobre la parada
+  int dDer = constrain(velDer, -100, 100) * 5 * potenciaDer / 100;
+  avanzando = velIzq > 0 && velDer > 0;
   // Las ruedas van montadas en espejo: la derecha gira al revés para ir hacia delante
   ledcWrite(PIN_RUEDA_IZQ, dIzq == 0 ? 0 : dutyDePulso(PARADA_IZQ_US + (INVERTIR_IZQ ? -dIzq : dIzq)));
   ledcWrite(PIN_RUEDA_DER, dDer == 0 ? 0 : dutyDePulso(PARADA_DER_US - (INVERTIR_DER ? -dDer : dDer)));
 }
+
+bool obstaculoDelante();
 
 // sentidoIzq / sentidoDer: +1 hacia delante, -1 hacia atrás, 0 quieta
 void moverRuedas(int sentidoIzq, int sentidoDer, int velocidad, unsigned long duracionMs) {
@@ -311,96 +357,389 @@ void moverRuedas(int sentidoIzq, int sentidoDer, int velocidad, unsigned long du
     pararRuedas();
     return;
   }
+  // Hacia delante con algo pegado: no arranca (hacia atrás o girando sí, para poder salir)
+  if (sentidoIzq > 0 && sentidoDer > 0 && obstaculoDelante()) {
+    pararRuedas();
+    // El mando repite la orden varias veces por segundo: avisar como mucho una vez por segundo
+    static unsigned long ultimoAviso = 0;
+    if (millis() - ultimoAviso > 1000) {
+      ultimoAviso = millis();
+      Serial.println("No avanzo: tengo algo delante");
+      ws.sendTXT("{\"tipo\":\"obstaculo\",\"cm\":0}");
+    }
+    return;
+  }
   escribirRuedas(sentidoIzq * velocidad, sentidoDer * velocidad);
   finMovimiento = millis() + duracionMs;
   if (finMovimiento == 0) finMovimiento = 1;
 }
 
-// ---------------------------------------------------------------- joystick
+// ---------------------------------------------------------------- cabeza
 
-bool joystickListo = false;      // conectado y calibrado al arrancar
-bool conduciendo = false;        // la palanca está fuera del centro
-int centroJoyX = 2048;
-int centroJoyY = 2048;
-unsigned long ultimaLecturaJoy = 0;
-bool mostrarJoystick = false;    // tecla "j" en el Monitor Serie
+float cabezaActual = 0;          // grados, 0 = al frente, positivo = izquierda
+float cabezaObjetivo = 0;
+float cabezaParada = 0;          // a dónde va ahora (puede ser pasarse un poco para quitar la holgura)
+unsigned long ultimoPasoCabeza = 0;
 
-// Al arrancar (sin tocar la palanca) apunta dónde está el centro. Si los valores son raros,
-// seguramente no está conectado: se desactiva para que el robot no se mueva solo.
-void calibrarJoystick() {
-  if (!USAR_JOYSTICK) return;
-  pinMode(PIN_JOY_SW, INPUT_PULLUP);
-  long sumaX = 0, sumaY = 0;
-  int minX = 4095, maxX = 0;
-  for (int i = 0; i < 32; i++) {
-    int x = analogRead(PIN_JOY_X);
-    int y = analogRead(PIN_JOY_Y);
-    sumaX += x;
-    sumaY += y;
-    minX = min(minX, x);
-    maxX = max(maxX, x);
-    delay(2);
+void escribirCabeza(float grados) {
+  float servo = CENTRO_CABEZA + (INVERTIR_CABEZA ? -grados : grados);
+  servo = constrain(servo, 0.0f, 180.0f);
+  int us = PULSO_MIN_US + (int) (servo * (PULSO_MAX_US - PULSO_MIN_US) / 180);
+  ledcWrite(PIN_CABEZA, dutyDePulso(us));
+}
+
+void iniciarCabeza() {
+  ledcAttach(PIN_CABEZA, 50, 14);
+  cabezaActual = cabezaObjetivo = cabezaParada = 0;
+  escribirCabeza(0);
+}
+
+// Hacia dónde le han mandado mirar (el servidor o el Monitor Serie). Los gestos al hablar
+// se hacen alrededor de aquí y, al callarse, vuelve aquí.
+int cabezaBase = 0;
+unsigned long ultimaOrdenCabeza = 0;
+unsigned long proximoGestoHablando = 0;
+
+void girarCabeza(int grados, bool exacto = false);
+
+void ordenCabeza(int grados) {
+  cabezaBase = constrain(grados, -GIRO_MAX_CABEZA, GIRO_MAX_CABEZA);
+  ultimaOrdenCabeza = millis();
+  girarCabeza(cabezaBase);
+}
+
+void girarCabeza(int grados, bool exacto) {
+  cabezaObjetivo = constrain(grados, -GIRO_MAX_CABEZA, GIRO_MAX_CABEZA);
+  if (exacto) {
+    cabezaParada = cabezaObjetivo;
+    return;
   }
-  centroJoyX = sumaX / 32;
-  centroJoyY = sumaY / 32;
-  bool centrado = centroJoyX > 1000 && centroJoyX < 3100 && centroJoyY > 1000 && centroJoyY < 3100;
-  bool estable = maxX - minX < 400;   // un pin al aire da valores que bailan mucho
-  joystickListo = centrado && estable;
-  if (joystickListo) {
-    Serial.printf("Joystick listo (centro x=%d y=%d)\n", centroJoyX, centroJoyY);
+  // Si tiene que ir hacia la izquierda (subir), primero se pasa un poco para llegar bajando
+  cabezaParada = cabezaObjetivo > cabezaActual ? cabezaObjetivo + GRADOS_HOLGURA : cabezaObjetivo;
+  Serial.printf("Cabeza: a %d grados\n", (int) cabezaObjetivo);
+}
+
+// Lleva la cabeza poco a poco hacia donde tiene que mirar. El servo sigue recibiendo pulsos
+// al llegar, para que sujete la cabeza y no ceda.
+void actualizarCabeza() {
+  if (millis() - ultimoPasoCabeza < 15) return;
+  ultimoPasoCabeza = millis();
+  if (cabezaActual == cabezaParada) {
+    if (cabezaParada == cabezaObjetivo) return;
+    cabezaParada = cabezaObjetivo;   // ya se ha pasado: ahora vuelve, bajando
+  }
+  float falta = cabezaParada - cabezaActual;
+  cabezaActual += constrain(falta, -GRADOS_POR_PASO, GRADOS_POR_PASO);
+  escribirCabeza(cabezaActual);
+}
+
+// ---------------------------------------------------------------- seguir la mano
+
+int distanciaCm();
+void olvidarLecturas();
+
+bool siguiendo = false;
+// Búsqueda con la cabeza: -1 = no está buscando; si no, por qué posición va
+const int BUSQUEDA[] = { 0, 20, -20, 40, -40, 60, -60 };
+const int PASOS_BUSQUEDA = sizeof(BUSQUEDA) / sizeof(BUSQUEDA[0]);
+int pasoBusqueda = -1;
+unsigned long siguientePasoBusqueda = 0;
+unsigned long inicioSeguir = 0;
+unsigned long ultimaVezVista = 0;
+unsigned long ultimoPasoSeguir = 0;
+int ultimaDistanciaMano = -1;        // la última vez que la vio (-1 = la acaba de buscar)
+unsigned long avanzandoDesde = 0;    // 0 = no está avanzando
+int distanciaAlAvanzar = 0;
+
+void empezarASeguir() {
+  siguiendo = true;
+  inicioSeguir = ultimaVezVista = millis();
+  finMovimiento = 0;
+  pasoBusqueda = -1;
+  ultimaDistanciaMano = -1;
+  avanzandoDesde = 0;
+  ordenCabeza(0);   // empieza mirando al frente
+  Serial.println("Siguiendo la mano (f para parar)");
+}
+
+void dejarDeSeguir(const char* motivo) {
+  if (!siguiendo) return;
+  siguiendo = false;
+  pararRuedas();
+  ordenCabeza(0);
+  Serial.printf("Dejo de seguir la mano (%s)\n", motivo);
+  char aviso[80];
+  snprintf(aviso, sizeof(aviso), "{\"tipo\":\"seguir_fin\",\"motivo\":\"%s\"}", motivo);
+  ws.sendTXT(aviso);
+}
+
+// Sigue la mano: se queda a SEGUIR_DISTANCIA_CM avanzando o retrocediendo; si la ve con la
+// cabeza girada, gira el cuerpo hacia ese lado mientras la cabeza vuelve al centro; y si la
+// pierde, la busca girando la cabeza a un lado y a otro.
+void actualizarSeguir() {
+  if (!siguiendo || millis() - ultimoPasoSeguir < 100) return;
+  ultimoPasoSeguir = millis();
+  if (millis() - inicioSeguir > SEGUIR_MAX_MS) {
+    dejarDeSeguir("tiempo");
+    return;
+  }
+
+  int d = distanciaCm();
+  bool laVe = d > 0 && d <= SEGUIR_ALCANCE_CM;
+  // Un salto grande de distancia: la mano se ha ido y ahora ve otra cosa detrás
+  if (laVe && ultimaDistanciaMano > 0 && abs(d - ultimaDistanciaMano) > SEGUIR_SALTO_CM) laVe = false;
+  // Avanzando un rato con la distancia clavada: lo que ve se mueve con él (el suelo), no es una
+  // mano (una mano nunca está tan quieta)
+  if (laVe && avanzandoDesde != 0 && millis() - avanzandoDesde > SEGUIR_SIN_ACERCARSE_MS) laVe = false;
+  // Para ver qué hace, en el Monitor Serie cada medio segundo
+  static unsigned long ultimoInforme = 0;
+  if (millis() - ultimoInforme > 500) {
+    ultimoInforme = millis();
+    Serial.printf("seguir: distancia %d cm, %s, cabeza %d grados\n", d,
+                  laVe ? "LA VEO" : (pasoBusqueda >= 0 ? "buscando" : "no la veo"), (int) cabezaObjetivo);
+  }
+
+  // Buscando: espera en cada posición a que la cabeza llegue y el sensor mida ahí
+  if (pasoBusqueda >= 0 && (long) (millis() - siguientePasoBusqueda) < 0) return;
+
+  if (!laVe) {
+    pararRuedas();
+    ultimaDistanciaMano = -1;
+    avanzandoDesde = 0;
+    if (millis() - ultimaVezVista > SEGUIR_PERDIDA_MS) {
+      dejarDeSeguir("perdida");
+      return;
+    }
+    // Siguiente sitio donde mirar
+    pasoBusqueda = (pasoBusqueda + 1) % PASOS_BUSQUEDA;
+    girarCabeza(BUSQUEDA[pasoBusqueda], true);
+    olvidarLecturas();   // las medidas de antes eran de otra dirección
+    siguientePasoBusqueda = millis() + SEGUIR_ESPERA_BUSCAR_MS;
+    return;
+  }
+
+  // La ve
+  pasoBusqueda = -1;
+  ultimaVezVista = millis();
+  ultimaDistanciaMano = d;
+
+  // Avanzar o retroceder según la distancia
+  int error = d - SEGUIR_DISTANCIA_CM;   // positivo = la mano está lejos: avanzar
+  int avance = 0;
+  if (abs(error) > SEGUIR_MARGEN_CM) {
+    avance = constrain(abs(error) * 3, SEGUIR_VEL_MIN, SEGUIR_VEL_MAX);
+    if (error < 0) avance = -avance;
+  }
+
+  // Girar el cuerpo hacia donde mira la cabeza (positivo = izquierda), y la cabeza al centro
+  int giro = 0;
+  if (cabezaObjetivo > SEGUIR_CABEZA_LADO) giro = SEGUIR_VEL_GIRO;
+  else if (cabezaObjetivo < -SEGUIR_CABEZA_LADO) giro = -SEGUIR_VEL_GIRO;
+  if (giro != 0) {
+    float paso = cabezaObjetivo > 0 ? -SEGUIR_CABEZA_PASO : SEGUIR_CABEZA_PASO;
+    girarCabeza((int) (cabezaObjetivo + paso), true);
+  }
+
+  // Para notar si avanza sin acercarse
+  if (avance > 0) {
+    // Cada vez que la distancia cambia, vuelve a contar
+    if (avanzandoDesde == 0 || abs(d - distanciaAlAvanzar) > 2) {
+      avanzandoDesde = millis();
+      distanciaAlAvanzar = d;
+    }
   } else {
-    Serial.printf("Joystick desactivado: no parece conectado (x=%d y=%d, variación %d). "
-                  "Revisa los cables y que no tocabas la palanca al arrancar.\n",
-                  centroJoyX, centroJoyY, maxX - minX);
-  }
-}
-
-// Posición de un eje de -1 a +1, con la zona muerta del centro quitada
-float ejeJoystick(int pin, int centro, bool invertir) {
-  int bruto = analogRead(pin);
-  float v = bruto >= centro ? (float) (bruto - centro) / (4095 - centro)
-                            : (float) (bruto - centro) / centro;
-  if (invertir) v = -v;
-  if (fabsf(v) < ZONA_MUERTA_JOY) return 0;
-  // Para que justo al salir de la zona muerta empiece suave, desde 0
-  return (v > 0 ? v - ZONA_MUERTA_JOY : v + ZONA_MUERTA_JOY) / (1 - ZONA_MUERTA_JOY);
-}
-
-// Conducir con la palanca: delante/detrás avanza, izquierda/derecha gira (se pueden mezclar)
-void leerJoystick() {
-  if (!joystickListo || millis() - ultimaLecturaJoy < 30) return;
-  ultimaLecturaJoy = millis();
-
-  float giro = ejeJoystick(PIN_JOY_X, centroJoyX, INVERTIR_JOY_X);
-  // En estos módulos, empujar hacia delante suele bajar el valor de Y
-  float avance = -ejeJoystick(PIN_JOY_Y, centroJoyY, INVERTIR_JOY_Y);
-  if (mostrarJoystick) {
-    Serial.printf("joystick: avance %+.2f  giro %+.2f  boton %s\n", avance, giro,
-                  digitalRead(PIN_JOY_SW) == LOW ? "PULSADO" : "-");
+    avanzandoDesde = 0;
   }
 
   if (avance == 0 && giro == 0) {
-    if (conduciendo) {
-      conduciendo = false;
-      pararRuedas();
-    }
+    pararRuedas();
     return;
   }
-  conduciendo = true;
-  finMovimiento = 0;   // anula el movimiento que estuviera haciendo por orden del servidor
-  float izq = constrain(avance + giro * GIRO_JOY, -1.0f, 1.0f);
-  float der = constrain(avance - giro * GIRO_JOY, -1.0f, 1.0f);
-  escribirRuedas((int) (izq * VELOCIDAD_MAX_JOYSTICK), (int) (der * VELOCIDAD_MAX_JOYSTICK));
+  // Girar a la izquierda = rueda izquierda hacia atrás y derecha hacia delante
+  escribirRuedas(avance - giro, avance + giro);
+  finMovimiento = 0;   // lo para este bucle, no el temporizador
 }
+
+// Mientras habla, pequeños giros de cabeza de vez en cuando. No los hace si el servidor acaba
+// de mandar mover la cabeza (un gesto de negar, mirar a un lado) ni con las ruedas en marcha.
+void gestosAlHablar() {
+  if (GIRO_AL_HABLAR == 0 || modo != HABLANDO || finMovimiento != 0 || siguiendo) return;
+  if (millis() - ultimaOrdenCabeza < 2500 || (long) (millis() - proximoGestoHablando) < 0) return;
+  girarCabeza(cabezaBase + random(-GIRO_AL_HABLAR, GIRO_AL_HABLAR + 1));
+  proximoGestoHablando = millis() + random(1200, 3000);
+}
+
+// ---------------------------------------------------------------- tacto
+
+float tactoBase = 0;             // valor sin tocar (se va ajustando despacio)
+bool tocando = false;
+unsigned long inicioToque = 0;
+bool cariciaAvisada = false;
+int toquesSeguidos = 0;
+unsigned long primerToque = 0;
+unsigned long ultimoAvisoTacto = 0;
+unsigned long ultimaLecturaTacto = 0;
+bool mostrarTacto = false;       // tecla "k" en el Monitor Serie
+
+void iniciarTacto() {
+  uint32_t suma = 0;
+  for (int i = 0; i < 16; i++) {
+    suma += touchRead(PIN_TACTO);
+    delay(5);
+  }
+  tactoBase = suma / 16.0f;
+  Serial.printf("Tacto listo (sin tocar: %d)\n", (int) tactoBase);
+}
+
+// Avisa al servidor (si no está ya hablando o escuchando, y no muy seguido)
+void avisarTacto(const char* gesto) {
+  Serial.printf("Tacto: %s\n", gesto);
+  if (!conectado || modo != ESPERANDO || millis() - ultimoAvisoTacto < TACTO_ENTRE_AVISOS_MS) return;
+  ultimoAvisoTacto = millis();
+  char aviso[48];
+  snprintf(aviso, sizeof(aviso), "{\"tipo\":\"tacto\",\"gesto\":\"%s\"}", gesto);
+  ws.sendTXT(aviso);
+}
+
+// Caricia = mantener la mano; cosquillas = varios toquecitos rápidos
+void actualizarTacto() {
+  if (millis() - ultimaLecturaTacto < 30) return;
+  ultimaLecturaTacto = millis();
+  uint32_t valor = touchRead(PIN_TACTO);
+  if (mostrarTacto) {
+    static unsigned long ultimoInforme = 0;
+    if (millis() - ultimoInforme > 300) {
+      ultimoInforme = millis();
+      Serial.printf("tacto: %lu (sin tocar %d)%s\n", (unsigned long) valor, (int) tactoBase,
+                    tocando ? "  <-- TOCANDO" : "");
+    }
+  }
+
+  if (!tocando && valor > tactoBase * TACTO_TOCADO) {
+    tocando = true;
+    inicioToque = millis();
+    cariciaAvisada = false;
+  } else if (tocando && valor < tactoBase * TACTO_SUELTO) {
+    tocando = false;
+    if (millis() - inicioToque < TACTO_TOQUE_MAX_MS) {
+      // Un toquecito: se cuentan los que van seguidos
+      if (toquesSeguidos == 0 || millis() - primerToque > TACTO_VENTANA_MS) {
+        toquesSeguidos = 0;
+        primerToque = millis();
+      }
+      toquesSeguidos++;
+      if (toquesSeguidos >= TACTO_TOQUES_COSQUILLAS) {
+        toquesSeguidos = 0;
+        avisarTacto("cosquillas");
+      }
+    }
+  }
+
+  if (tocando && !cariciaAvisada && millis() - inicioToque > TACTO_CARICIA_MS) {
+    cariciaAvisada = true;
+    toquesSeguidos = 0;
+    avisarTacto("caricia");
+  }
+
+  // Sin tocar, el valor de reposo cambia poco a poco (humedad, temperatura): se sigue despacio
+  if (!tocando) tactoBase = tactoBase * 0.99f + valor * 0.01f;
+}
+
+// ---------------------------------------------------------------- ultrasonidos
+
+// El eco se mide con una interrupción, sin esperar: así no se corta el audio.
+volatile unsigned long ecoInicio = 0;
+volatile unsigned long ecoDuracion = 0;
+volatile bool ecoListo = false;
+unsigned long ultimoDisparo = 0;
+int lecturas[3] = { -1, -1, -1 };   // las últimas medidas en cm (-1 = nada a la vista)
+int numLectura = 0;
+bool sensorVisto = false;            // ha contestado alguna vez (si no, no está conectado)
+bool mostrarDistancia = false;       // tecla "u" en el Monitor Serie
+
+void IRAM_ATTR alCambiarEco() {
+  if (digitalRead(PIN_US_ECHO)) {
+    ecoInicio = micros();
+  } else {
+    ecoDuracion = micros() - ecoInicio;
+    ecoListo = true;
+  }
+}
+
+void iniciarUltrasonidos() {
+  pinMode(PIN_US_TRIG, OUTPUT);
+  digitalWrite(PIN_US_TRIG, LOW);
+  pinMode(PIN_US_ECHO, INPUT_PULLDOWN);   // si se suelta el cable, no recoge ruido
+  attachInterrupt(digitalPinToInterrupt(PIN_US_ECHO), alCambiarEco, CHANGE);
+}
+
+void olvidarLecturas() {
+  lecturas[0] = lecturas[1] = lecturas[2] = -1;
+}
+
+// La mediana de las 3 últimas medidas: un eco suelto falso no cuenta.
+// -2 = el sensor no ha contestado nunca (no está conectado), -1 = no ve nada
+int distanciaCm() {
+  if (!sensorVisto) return -2;
+  int a = lecturas[0], b = lecturas[1], c = lecturas[2];
+  // "nada a la vista" cuenta como lo más lejos posible para la mediana
+  int x = a < 0 ? 9999 : a, y = b < 0 ? 9999 : b, z = c < 0 ? 9999 : c;
+  int m = max(min(x, y), min(max(x, y), z));
+  return m == 9999 ? -1 : m;
+}
+
+// Algo más cerca que la distancia de freno en las 2 últimas medidas (más rápido que la mediana
+// de 3, y un eco falso suelto no basta)
+bool obstaculoDelante() {
+  int ultima = lecturas[(numLectura + 2) % 3];
+  int anterior = lecturas[(numLectura + 1) % 3];
+  return ultima > 0 && ultima < DISTANCIA_FRENO_CM && anterior > 0 && anterior < DISTANCIA_FRENO_CM;
+}
+
+void actualizarUltrasonidos() {
+  if (millis() - ultimoDisparo < 70) return;   // que se apague el eco anterior
+  ultimoDisparo = millis();
+
+  int cm = -1;
+  unsigned long bruto = ecoListo ? ecoDuracion : 0;
+  if (ecoListo) {
+    cm = (int) (ecoDuracion / 58);
+    sensorVisto = true;
+    if (cm <= 1 || cm > DISTANCIA_MAX_CM) cm = -1;
+  }
+  ecoListo = false;
+  lecturas[numLectura] = cm;
+  numLectura = (numLectura + 1) % 3;
+  if (mostrarDistancia) {
+    int d = distanciaCm();
+    if (d == -2) Serial.println("distancia: el sensor no contesta (¿cables de Trig y Echo?)");
+    else if (d < 0) Serial.printf("distancia: nada a la vista (eco %lu us)\n", bruto);
+    else Serial.printf("distancia: %d cm (eco %lu us)\n", d, bruto);
+  }
+
+  // Freno de seguridad: hacia delante y algo muy cerca
+  if (avanzando && obstaculoDelante()) {
+    int d = distanciaCm();
+    pararRuedas();
+    Serial.printf("¡Obstáculo a %d cm! Freno\n", d);
+    char aviso[48];
+    snprintf(aviso, sizeof(aviso), "{\"tipo\":\"obstaculo\",\"cm\":%d}", d);
+    ws.sendTXT(aviso);
+  }
+
+  // Disparo de la siguiente medida (pulso de 10 us en Trig)
+  digitalWrite(PIN_US_TRIG, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(PIN_US_TRIG, LOW);
+}
+
+void dejarDeSeguir(const char* motivo);
 
 void comandoRuedas(JsonDocument& doc) {
   String accion = doc["accion"] | "parar";
+  dejarDeSeguir("orden de ruedas");
   int velocidad = doc["velocidad"] | 50;
   unsigned long duracion = doc["duracion_ms"] | 1000;
-  if (conduciendo) {
-    Serial.printf("Ruedas: %s ignorado (estás conduciendo con el joystick)\n", accion.c_str());
-    return;
-  }
   Serial.printf("Ruedas: %s vel=%d dur=%lu\n", accion.c_str(), velocidad, duracion);
 
   if (accion == "adelante")             moverRuedas(+1, +1, velocidad, duracion);
@@ -422,6 +761,19 @@ void leerSerie() {
   linea.trim();
   if (linea.isEmpty()) return;
 
+  // "izq 90" / "der 90": % de velocidad de cada rueda, para que vaya recto
+  if (linea.startsWith("izq") || linea.startsWith("der")) {
+    int valor = constrain(linea.substring(3).toInt(), 50, 100);
+    if (linea.startsWith("izq")) {
+      potenciaIzq = valor;
+      prefs.putInt("potIzq", valor);
+    } else {
+      potenciaDer = valor;
+      prefs.putInt("potDer", valor);
+    }
+    Serial.printf("Ruedas: izquierda %d%%, derecha %d%% (guardado). Prueba con w\n", potenciaIzq, potenciaDer);
+    return;
+  }
   if (isDigit(linea[0])) {
     velocidadPrueba = constrain(linea.toInt(), 10, 100);
     Serial.printf("Velocidad de prueba: %d\n", velocidadPrueba);
@@ -435,7 +787,7 @@ void leerSerie() {
     case 'd': Serial.println("Prueba: girar derecha");     moverRuedas(+1, -1, velocidadPrueba, dur); break;
     case 'i': Serial.println("Prueba: solo rueda izquierda"); moverRuedas(+1, 0, velocidadPrueba, dur); break;
     case 'o': Serial.println("Prueba: solo rueda derecha");   moverRuedas(0, +1, velocidadPrueba, dur); break;
-    case 'x': Serial.println("Prueba: parar");             pararRuedas(); break;
+    case 'x': Serial.println("Prueba: parar");             dejarDeSeguir("tecla"); pararRuedas(); break;
     case 'm':
       monitorNiveles = !monitorNiveles;
       Serial.printf("Monitor de niveles del micro: %s\n", monitorNiveles ? "SÍ" : "NO");
@@ -443,13 +795,25 @@ void leerSerie() {
     case 't':
       pitidoDePrueba();
       break;
-    case 'j':
-      mostrarJoystick = !mostrarJoystick;
-      Serial.printf("Ver el joystick: %s%s\n", mostrarJoystick ? "SÍ" : "NO",
-                    joystickListo ? "" : " (ojo: está desactivado, mira el mensaje del arranque)");
+    case 'c': ordenCabeza(0); break;
+    case 'q': ordenCabeza(cabezaBase + 30); break;
+    case 'e': ordenCabeza(cabezaBase - 30); break;
+    case 'k':
+      mostrarTacto = !mostrarTacto;
+      Serial.printf("Ver el tacto: %s\n", mostrarTacto ? "SÍ" : "NO");
+      break;
+    case 'f':
+      if (siguiendo) dejarDeSeguir("tecla");
+      else empezarASeguir();
+      break;
+    case 'u':
+      mostrarDistancia = !mostrarDistancia;
+      Serial.printf("Ver la distancia: %s\n", mostrarDistancia ? "SÍ" : "NO");
       break;
     default:  Serial.println("Teclas: w a s d (mover), i o (una rueda), x (parar), 10..100 (velocidad), "
-                             "m (niveles del micro), j (ver el joystick), t (pitido de prueba)");
+                             "izq 90 / der 90 (para ir recto), c (cabeza al centro), q e (cabeza izquierda/derecha), "
+                             "u (ver la distancia), f (seguir la mano), k (ver el tacto), "
+                             "m (niveles del micro), t (pitido de prueba)");
   }
 }
 
@@ -481,6 +845,7 @@ void cambiarModo(Modo nuevo) {
 
 // Vuelve a reposo tirando el audio acumulado (puede llevar su propia voz del altavoz)
 void volverAEsperar() {
+  if (modo == HABLANDO) girarCabeza(cabezaBase);
   vaciarMicro();
   trozosConVoz = 0;
   noEscucharHasta = millis() + PAUSA_TRAS_HABLAR_MS;
@@ -494,6 +859,21 @@ void alMensajeTexto(uint8_t* payload, size_t longitud) {
   }
   if (doc["cmd"] == "ruedas") {
     comandoRuedas(doc);
+    return;
+  }
+  if (doc["cmd"] == "cabeza") {
+    ordenCabeza(doc["grados"] | 0);
+    return;
+  }
+  if (doc["cmd"] == "seguir") {
+    if (doc["activo"] | false) empezarASeguir();
+    else dejarDeSeguir("orden");
+    return;
+  }
+  if (doc["cmd"] == "distancia") {
+    char respuesta[48];
+    snprintf(respuesta, sizeof(respuesta), "{\"tipo\":\"distancia\",\"cm\":%d}", distanciaCm());
+    ws.sendTXT(respuesta);
     return;
   }
   if (doc["cmd"] == "volumen") {
@@ -538,6 +918,7 @@ void alEventoWs(WStype_t tipo, uint8_t* payload, size_t longitud) {
     case WStype_DISCONNECTED:
       if (conectado) Serial.println("Desconectado del servidor, reintentando...");
       conectado = false;
+      dejarDeSeguir("sin servidor");
       pararRuedas();   // seguridad: sin servidor, quietos
       if (modo != ESPERANDO) cambiarModo(ESPERANDO);
       break;
@@ -584,11 +965,16 @@ void setup() {
   prefs.begin("bicho", false);
   volumen = prefs.getInt("volumen", VOLUMEN_INICIAL);
   Serial.printf("Volumen guardado: %d\n", volumen);
+  potenciaIzq = prefs.getInt("potIzq", potenciaIzq);
+  potenciaDer = prefs.getInt("potDer", potenciaDer);
+  Serial.printf("Ruedas: izquierda %d%%, derecha %d%%\n", potenciaIzq, potenciaDer);
 
   ledcAttach(PIN_RUEDA_IZQ, 50, 14);
   ledcAttach(PIN_RUEDA_DER, 50, 14);
   pararRuedas();
-  calibrarJoystick();   // no toques la palanca mientras arranca
+  iniciarCabeza();      // la cabeza mira al frente al arrancar
+  iniciarUltrasonidos();
+  iniciarTacto();       // no toques la chapa mientras arranca
 
   iniciarMicro();
   encenderMicro();   // y ya no se apaga
@@ -632,11 +1018,13 @@ void loop() {
   if (finMovimiento != 0 && (long) (millis() - finMovimiento) >= 0) {
     pararRuedas();
   }
-  leerJoystick();
+  actualizarCabeza();
+  actualizarUltrasonidos();
+  gestosAlHablar();
+  actualizarSeguir();
+  actualizarTacto();
 
-  // Para hablar vale el BOOT o apretar la palanca del joystick
-  bool botonPulsado = digitalRead(PIN_BOTON) == LOW
-                      || (joystickListo && digitalRead(PIN_JOY_SW) == LOW);
+  bool botonPulsado = digitalRead(PIN_BOTON) == LOW;
   bool recienPulsado = botonPulsado && !botonAntes;
   botonAntes = botonPulsado;
 

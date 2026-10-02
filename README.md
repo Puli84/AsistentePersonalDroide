@@ -14,7 +14,7 @@ Este fichero resume **el estado actual del proyecto** para poder seguir en otra 
  micro INMP441 ──audio──►  Servidor Spring Boot (bicho-estado-server) ──► OpenAI: voz→texto (STT)
  altavoz ◄──voz (PCM)───   :8080                                      ──► Claude: piensa + herramientas
  servos 360° ◄─órdenes──   · /ws/robot  (ESP32, web, mando del móvil) ──► OpenAI: texto→voz (TTS)
- joystick (local)          · /ws/estado (cara de la web)              ──► n8n :5678 (webhooks)
+ cabeza, ultrasonido, tacto · /ws/estado (cara de la web)             ──► n8n :5678 (webhooks)
                            · web: cara/chat (/) y mando (/mando.html)       ├─► Telegram (bot RoboDragón)
                                                                             └─► Google Calendar
 ```
@@ -81,22 +81,30 @@ También se puede compilar y subir con el `arduino-cli` que trae el IDE (FQBN `e
 | Amplificador MAX98357A (a 5 V; GAIN y SD sueltos) | DIN 7 · BCLK 15 · LRC 16 |
 | Servos 360° de las ruedas | izquierda 17 · derecha 18 |
 | Botón para hablar | BOOT (0) |
-| Joystick PS2 (a **3V3**, no a 5 V) | VRx 9 · VRy 10 · SW 11 |
-| Libres | 12, 46 (46 es de arranque: solo como entrada) |
+| Servo 180° de la cabeza (a 5 V) | 9 |
+| Ultrasonido RCWL-9610 (a **3V3**) | Trig 10 · Echo 11 |
+| Tacto (cable a una chapa o cinta de cobre) | 14 |
+| Reservados | brazos 12 y 21 · infrarrojo 1 y 2 · I2C 8 y 13 |
+
+El joystick se quitó: con el cuerpo se conduce con el mando del móvil.
 
 ### Qué hace
-- **Escucha continua**: detecta voz con un umbral que se adapta al ruido de fondo, guarda ~320 ms de antes para no cortar el "Ro…" y da la frase por terminada tras 900 ms de silencio. También se puede hablar manteniendo pulsado BOOT o apretando la palanca del joystick.
+- **Escucha continua**: detecta voz con un umbral que se adapta al ruido de fondo, guarda ~320 ms de antes para no cortar el "Ro…" y da la frase por terminada tras 900 ms de silencio. También se puede hablar manteniendo pulsado BOOT.
 - **Ruedas**: pulsos de servo con LEDC. Se paran solas al acabar cada orden, y también si se pierde la conexión. `PARADA_*_US` e `INVERTIR_*` sirven para ajustar la deriva y el sentido de giro.
-- **Joystick**: conduce a mano (avance y giro mezclados, zona muerta del 15 %, máximo 70). Mientras se usa, tiene prioridad sobre las órdenes del servidor. Se calibra al arrancar (sin tocarlo) y se desactiva solo si no parece conectado.
+- **Ir recto**: `potenciaIzq/Der` (% de cada rueda), ajustable con `izq 85` / `der 90` en el Monitor Serie y guardado en la placa.
+- **Cabeza**: gira suave (±70°), llega siempre desde el mismo lado para quitar la holgura del servo y mantiene la fuerza. Mientras habla hace giros pequeños (`GIRO_AL_HABLAR`).
+- **Ultrasonido**: mide ~14 veces por segundo con una interrupción (no corta el audio). **Freno**: si va hacia delante y hay algo a menos de `DISTANCIA_FRENO_CM` (12) en dos medidas seguidas, para, y no deja volver a avanzar (atrás y girar sí).
+- **Seguir la mano** (`f` o por voz): se queda a 20 cm; si la pierde, la busca girando la cabeza y gira el cuerpo hacia ella. Ignora saltos de distancia y lo que no se acerca al avanzar (el suelo). Para a los 5 s sin verla o al minuto.
+- **Tacto** (GPIO 14): se calibra al arrancar. Mantener la mano = caricia; 3 toquecitos = cosquillas. Lo avisa al servidor, que hace reaccionar a Claude (como mucho una vez cada 5 s).
 - **Volumen** guardado en la memoria de la placa (0–100; 50 = tal cual). Se cambia por voz.
 - **Motivo del reinicio**: lo manda al servidor en el primer "hola", y el servidor avisa en la consola si fue un *brownout*.
 - La espera mientras habla cuenta desde el último trozo de audio, así que las respuestas largas no se cortan.
 
 ### Teclas del Monitor Serie
-`w a s d` mover · `i o` una sola rueda · `x` parar · `10..100` velocidad de prueba · `m` niveles del micro · `j` ver el joystick · `t` pitido de prueba (1 s, sin servidor).
+`w a s d` mover · `i o` una sola rueda · `x` parar · `10..100` velocidad de prueba · `izq 85` / `der 90` ajuste para ir recto · `c` cabeza al centro · `q e` cabeza a izquierda/derecha · `u` ver la distancia · `f` seguir la mano · `k` ver el tacto · `m` niveles del micro · `t` pitido de prueba (1 s, sin servidor).
 
 ### Ajustes útiles en el `.ino`
-`GANANCIA_MIC` (14–16; menor = más sensible; ahora 15 porque saturaba) · `ESCUCHA_CONTINUA` · `USAR_JOYSTICK` (ponerlo a `false` si se quita el joystick) · `PARADA_IZQ_US/DER_US` · `INVERTIR_*`.
+`GANANCIA_MIC` (14–16; menor = más sensible; ahora 15 porque saturaba) · `ESCUCHA_CONTINUA` · `PARADA_IZQ_US/DER_US` · `INVERTIR_*` · `CENTRO_CABEZA` · `GIRO_AL_HABLAR` · `DISTANCIA_FRENO_CM` · `SEGUIR_*` · `TACTO_*`.
 
 ---
 
@@ -104,11 +112,13 @@ También se puede compilar y subir con el `arduino-cli` que trae el IDE (FQBN `e
 
 ### Claude
 - Modelo `claude-sonnet-5` con `effort: low` (rapidez en voz), SDK `anthropic-java`.
+- **Caché de prompts**: el sistema va en dos bloques, el fijo (personalidad y reglas, caché de 1 h) y el del turno (hora, volumen, memoria), y la petición lleva caché automática para las vueltas de herramientas. En la consola sale `Tokens: entrada … + caché leída … + caché escrita …` para comprobarlo.
 - El prompt de sistema se monta en cada turno: `personalidad.txt` + reglas técnicas (en `CerebroClaude.REGLAS`: frases cortas, sin markdown, cómo usar el cuerpo…) + fecha y hora (`Atlantic/Canary`) + ciudad + volumen + `memoria.txt`, y "te acaban de despertar" cuando corresponde.
 - **Memoria** (`MemoriaLargoPlazo`): `memoria.txt` por secciones, que va entera en el prompt (solo las secciones con algo). Herramientas `recordar` (en su sección), `corregir_recuerdo` y `olvidar`; estas dos solo actúan si encaja exactamente un recuerdo (sin importar tildes ni mayúsculas). Si crece a cientos de datos o se quiere un diario, pasar a SQLite con búsqueda.
-- **Herramientas propias**: `mover_ruedas`, `poner_cara`, `recordar`, `corregir_recuerdo`, `olvidar`, `cambiar_volumen`, `terminar_conversacion`, `mostrar_en_pantalla`, `quitar_pantalla`, más `web_search` (máximo 3 por turno) y las de n8n.
-- **Ruedas en cola**: los pasos se ejecutan uno tras otro, con un máximo de 20 s por respuesta. Una orden nueva cancela lo que estuviera haciendo.
-- Historial de 30 mensajes, recortado solo al principio de un turno. Los últimos 15 turnos se guardan en `conversacion.json` ("Olvidar conversación" en la web lo borra).
+- **Herramientas propias**: `mover_ruedas`, `mover_cabeza`, `gesto_cabeza` (negar, mirar alrededor), `medir_distancia`, `seguir_mano`, `poner_cara`, `recordar`, `corregir_recuerdo`, `olvidar`, `cambiar_volumen`, `terminar_conversacion`, `mostrar_en_pantalla`, `quitar_pantalla`, más `web_search` (1 por turno), `web_fetch` (1 página por turno, hasta 8.000 tokens) y las de n8n.
+- **Tacto**: la ESP32 manda `{"tipo":"tacto","gesto":"caricia"|"cosquillas"}` y `ConversacionEsp32` se lo cuenta a Claude entre paréntesis para que reaccione.
+- **Ruedas y cabeza en cola**: los pasos se ejecutan uno tras otro, con un máximo de 20 s por respuesta. Una orden nueva cancela lo que estuviera haciendo. Si la ESP32 frena por un obstáculo, se tira lo que quedaba en cola.
+- Historial de 20 mensajes, recortado solo al principio de un turno. Los últimos 15 turnos se guardan en `conversacion.json` ("Olvidar conversación" en la web lo borra).
 
 ### Personalidad actual
 Gruñón y quejica pero entrañable. Le fastidia que lo despierten. Conoce a **Leo** (7 años): con él habla sencillo, se queja en broma y deja de gruñir si lo nota triste. No distingue voces: sabe que es Leo si lo dice o lo nombran. Todo esto está en `personalidad.txt` y se puede editar sin reiniciar.
@@ -131,7 +141,7 @@ Gruñón y quejica pero entrañable. Le fastidia que lo despierten. Conoce a **L
 - API: `POST /api/conversar {"texto"}`, `POST /api/conversar/voz` (multipart `audio`), `POST /api/olvidar`, `GET/POST /api/estado`.
 
 ### Tests
-En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos y n8n (12 tests). Sin Maven instalado, se compilan y ejecutan con `javac` y el *launcher* de JUnit usando los jars de `~/.m2`.
+En `src/test`: historial, detector de nombre, eco de la pista, troceo de textos, memoria y n8n (18 tests). Sin Maven instalado, se compilan y ejecutan con `javac` y el *launcher* de JUnit usando los jars de `~/.m2`.
 
 ---
 
@@ -175,7 +185,9 @@ Sustituye a WhatsApp con CallMeBot, que solo entregaba durante las 24 h siguient
   - Una batería de coche RC (7,2–7,4 V NiMH/LiPo) sirve para probar con el mismo reductor (con LiPo, no bajar de ~3 V por celda).
   - Siempre: interruptor, condensador de 470–1000 µF, GND común y cables cortos y gruesos a servos y amplificador. Con la batería puesta, apagarla antes de enchufar el USB para programar.
   - Duración estimada con 2 × 3.000 mAh: 8–12 h en reposo, 4–8 h moviéndose.
-- **Amplificador MAX98357A**: sus pines hacían mal contacto (volumen que va y viene, en cualquier fila de la protoboard). Ahora funciona **pinchado a medias**. Pendiente: repasar sus soldaduras o soldarle cables dupont.
+- **Amplificador MAX98357A**: el altavoz sonaba muy bajito o nada por una **soldadura fría** en una pata del **borne verde** del altavoz (estaño solo en medio aro). Resoldado, suena bien. El primero se quemó (ruido fuerte y cono empujado = corriente continua).
+- **Soldaduras y contactos**: el micro mudo en la placa perforada también eran soldaduras. Soldaduras brillantes y en cono, que cubran todo el aro; probar cada pieza al soldarla.
+- **Alimentación actual (funciona)**: LiFePO4 2S (6,4 V, 700 mAh) → LM2596 a 5,0 V → **cable USB cortado al USB-C de la ESP32** (el pin 5Vin no sirve: lleva un diodo) y regleta de +5 V/GND para servos y amplificador, con GND común. **4 pilas alcalinas no bastan** (el LM2596 necesita ~7 V a la entrada). Pelar los cables sin cortar hilos: uno con solo 2 hilos se derritió.
 - **Micrófono**: si el log dice `saturado`, subir `GANANCIA_MIC`; si el pico sale muy bajo (~1000), bajarlo.
 - **Sensor PIR de cúpula** (el que se probó): es un interruptor de lámpara, no un sensor para microcontrolador (MOSFET con salida `L` a GND, 12 V). A 5 V deja la salida activada siempre. Aparcado. Si se quiere uno, comprar un AM312 o un HC-SR501.
 - La ESP32-S3 solo tiene **Bluetooth LE** (no clásico). El control desde el móvil se hace por wifi con `mando.html`.
@@ -185,12 +197,10 @@ Sustituye a WhatsApp con CallMeBot, que solo entregaba durante las 24 h siguient
 ## 8. Siguientes pasos
 
 - **Cuerpo**: [Droid-E3D – Edición compatible con Arduino](https://makerworld.com/es/models/2005598-droid-e3d-compatible-arduino-edition) (tipo WALL-E, orugas). Plan detallado en `Desktop\robodragón\CUERPO-ROBOT.md`:
-  - Orugas con los 2 servos 360° actuales (17/18), sin cambiar código.
-  - **3 servos de 180°** (cabeza y 2 brazos) en 9/10/11, quitando el joystick.
-  - **HC-SR04P** (3,3 V) en TRIG 12 / ECHO 46.
-  - **2×18650 + reductor a 5 V de ≥3 A** + interruptor + condensador de 470 µF.
-  - La ESP32-S3 cabe en el compartimento trasero (medido en los STL).
-- **Programar cuando esté montado**: herramientas de Claude para mover la cabeza y los brazos; freno de seguridad con el ultrasonidos; "¿qué tienes delante?"; "acércate"/"sígueme".
+  - ✅ Montado: orugas con los 2 servos 360°, cabeza con servo 180° y ultrasonido RCWL-9610, tacto.
+  - Pendiente: **2 servos de 180° para los brazos** (pines 12 y 21) y sus herramientas.
+  - Pendiente: **2×18650 + reductor a 5 V de ≥3 A** + interruptor + condensador de 470 µF.
+- **Home Assistant** (tele Samsung, Fire TV, Chromecast) controlado desde n8n.
 - **Ideas con n8n**: lista de la compra compartida (Sheets/Keep), resumen de buenos días (tiempo + calendario), resumen de Gmail, bot de Telegram para toda la familia (con foto y nombre propios, y grupos).
 - **LCD de 3,5"** (SPI 480x320, ILI9488/ST7796, mejor táctil; librería LovyanGFX o TFT_eSPI): dibujar en la ESP32 el mismo contenido de pantalla que ya muestra la web, y llevar los ojos a la LCD. Pines libres en el otro lado de la placa (1, 2, 3, 8, 13, 14, 21, 38–42); los 35–37 los usa la PSRAM.
 - Pasar la electrónica a una **placa perforada** (la protoboard da falsos contactos con el movimiento).

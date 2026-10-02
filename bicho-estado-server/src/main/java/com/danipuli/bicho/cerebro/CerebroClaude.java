@@ -3,6 +3,7 @@ package com.danipuli.bicho.cerebro;
 import com.anthropic.client.AnthropicClient;
 import com.anthropic.client.okhttp.AnthropicOkHttpClient;
 import com.anthropic.core.JsonValue;
+import com.anthropic.models.messages.CacheControlEphemeral;
 import com.anthropic.models.messages.ContentBlock;
 import com.anthropic.models.messages.ContentBlockParam;
 import com.anthropic.models.messages.Message;
@@ -10,9 +11,11 @@ import com.anthropic.models.messages.MessageCreateParams;
 import com.anthropic.models.messages.MessageParam;
 import com.anthropic.models.messages.OutputConfig;
 import com.anthropic.models.messages.StopReason;
+import com.anthropic.models.messages.TextBlockParam;
 import com.anthropic.models.messages.Tool;
 import com.anthropic.models.messages.ToolResultBlockParam;
 import com.anthropic.models.messages.ToolUseBlock;
+import com.anthropic.models.messages.WebFetchTool20260209;
 import com.anthropic.models.messages.WebSearchTool20260209;
 import com.danipuli.bicho.n8n.HerramientasN8n;
 import com.danipuli.bicho.ws.EstadoWebSocketHandler;
@@ -55,7 +58,7 @@ public class CerebroClaude {
     private static final Logger log = LoggerFactory.getLogger(CerebroClaude.class);
 
     /** Mensajes de conversación que se recuerdan (se descartan los más antiguos). */
-    private static final int MAX_MENSAJES_HISTORIAL = 30;
+    private static final int MAX_MENSAJES_HISTORIAL = 20;
 
     /** Vueltas máximas de herramientas por turno, por si acaso. */
     private static final int MAX_VUELTAS_HERRAMIENTAS = 5;
@@ -95,6 +98,10 @@ public class CerebroClaude {
             el tiempo que hace, noticias, resultados, horarios, precios... Úsalo solo cuando haga falta \
             (lo que ya sabes, contéstalo directamente) y resume lo encontrado en una o dos frases \
             habladas, sin decir direcciones web ni fuentes salvo que te las pidan.
+            - Puedes abrir y leer una página web concreta (web_fetch) cuando te pidan entrar en una web \
+            ("entra en elpais.com", "mira la web del colegio") o cuando un resultado de la búsqueda no \
+            baste. Si no te dicen la dirección exacta, búscala antes con web_search. Resume lo que ponga \
+            en pocas frases habladas.
             - Te despiertan diciendo tu nombre y, justo después de contestar, sigues escuchando unos \
             segundos sin que lo repitan. Cuando te pidan silencio o descanso ("cállate", "calla", \
             "silencio", "duérmete", "a dormir", "deja de escuchar", "ciérrate"), \
@@ -106,7 +113,23 @@ public class CerebroClaude {
             en la pantalla ("te lo pongo en la pantalla"). Márcala como fija solo si la van a ir leyendo un \
             rato (una receta mientras cocinan); lo demás se quita solo al acabar la conversación. Si te dicen \
             "apaga la pantalla", "quita eso" o "ya está", usa quitar_pantalla para volver a tus ojos.
-            - Todavía no tienes brazos ni cabeza móvil; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
+            - Tienes una cabeza que gira a los lados (herramienta mover_cabeza) y tus ojos son un sensor \
+            de ultrasonidos que mide a qué distancia está lo que tienes delante (herramienta medir_distancia). \
+            Úsalos cuando te pidan mirar a un lado, decir que no con la cabeza, o saber qué tienes delante o \
+            a qué distancia está algo; para acercarte a algo, mide antes la distancia y avanza menos de eso. \
+            Solo mide distancias, no ves imágenes: no sabes qué es el objeto. Si vas hacia delante y tienes \
+            algo muy cerca, frenas solo para no chocar. Mientras hablas, tu cabeza ya se mueve un poco sola.
+            - Gestos con la cabeza (herramienta gesto_cabeza): cuando digas que no, te niegues a algo o \
+            no estés de acuerdo, haz "negar" a la vez que lo dices; "mirar_alrededor" cuando busques algo \
+            o te pregunten qué hay por ahí. Úsalos con naturalidad, no en cada frase.
+            - Puedes seguir una mano (herramienta seguir_mano): te quedas a unos 20 centímetros de ella, \
+            avanzando, retrocediendo y girando hacia ella; si la pierdes la buscas con la cabeza, y \
+            paras solo si no la encuentras en unos segundos o al minuto. Úsala cuando te pidan que sigas \
+            la mano o que les sigas, y desactívala si te piden parar.
+            - Tienes un sensor de tacto en la cabeza. Cuando te llegue un mensaje entre paréntesis diciendo \
+            que te acarician o te hacen cosquillas, nadie te ha hablado: reacciona como una mascota, con una \
+            frase muy corta (una risa, un ronroneo, una queja graciosa...) y la cara que toque.
+            - Todavía no tienes brazos; si te piden algo que tu cuerpo no puede hacer, dilo con gracia.
             - Si una herramienta te dice que no hay robot conectado, puedes contarlo de pasada.
 
             Tu memoria:
@@ -198,7 +221,8 @@ public class CerebroClaude {
         this.n8n = n8n;
         this.herramientas = List.of(herramientaRuedas(), herramientaCara(), herramientaRecordar(),
                 herramientaCorregirRecuerdo(), herramientaOlvidar(),
-                herramientaVolumen(), herramientaTerminar(), herramientaPantalla(), herramientaQuitarPantalla());
+                herramientaVolumen(), herramientaTerminar(), herramientaPantalla(), herramientaQuitarPantalla(),
+                herramientaCabeza(), herramientaDistancia(), herramientaGesto(), herramientaSeguir());
         cargarConversacion();
         if (!configurado) {
             log.warn("Falta la API key de Anthropic: ponla en src/main/resources/secrets.properties (bicho.anthropic.api-key)");
@@ -248,12 +272,22 @@ public class CerebroClaude {
         // Lo nuevo que le digas manda: si seguía moviéndose por la orden anterior, se para
         robot.cancelarMovimientos();
         msMovimientoTurno = 0;
-        // Se lee en cada turno: así puedes cambiar la personalidad sin reiniciar el servidor
-        String promptSistema = leerPersonalidad() + "\n\n" + REGLAS + seccionFecha() + seccionVolumen()
-                + seccionMemoria()
+        // El prompt de sistema va en dos partes, para la caché de Anthropic (lo repetido se cobra
+        // mucho más barato): primero lo que casi nunca cambia (personalidad y reglas; se lee en
+        // cada turno, así que puedes cambiar la personalidad sin reiniciar el servidor) y después
+        // lo que cambia en cada turno (la hora, el volumen, la memoria)
+        String sistemaFijo = leerPersonalidad() + "\n\n" + REGLAS;
+        String sistemaDelTurno = seccionFecha() + seccionVolumen() + seccionMemoria()
                 + (recienDespertado
                         ? "\nAhora mismo estabas dormido en modo de espera y te acaban de despertar diciendo tu nombre.\n"
                         : "");
+        List<TextBlockParam> sistema = List.of(
+                TextBlockParam.builder()
+                        .text(sistemaFijo)
+                        // 1 hora: el robot se usa a ratos a lo largo del día
+                        .cacheControl(CacheControlEphemeral.builder().ttl(CacheControlEphemeral.Ttl.TTL_1H).build())
+                        .build(),
+                TextBlockParam.builder().text(sistemaDelTurno).build());
         // Las automatizaciones de n8n también se leen en cada turno (herramientas-n8n.json)
         List<com.anthropic.models.messages.ToolUnion> todas = new ArrayList<>();
         herramientas.forEach(h -> todas.add(com.anthropic.models.messages.ToolUnion.ofTool(h)));
@@ -269,16 +303,26 @@ public class CerebroClaude {
             MessageCreateParams params = MessageCreateParams.builder()
                     .model(modelo)
                     .maxTokens(4096L)
-                    .system(promptSistema)
+                    .systemOfTextBlockParams(sistema)
+                    // Y la conversación: las vueltas de herramientas de un mismo turno repiten todo
+                    .cacheControl(CacheControlEphemeral.builder().build())
                     .messages(mensajes)
                     .tools(todas)
                     // Búsqueda en internet (la hace Anthropic): tiempo, noticias, resultados...
                     .addTool(WebSearchTool20260209.builder().maxUses(maxBusquedas).build())
+                    // Abrir una página concreta (la que te digan, o una de los resultados de la búsqueda).
+                    // Se limita lo que lee de la página, que se cobra como texto de entrada
+                    .addTool(WebFetchTool20260209.builder().maxUses(1).maxContentTokens(8000).build())
                     // Conversación por voz: prima la rapidez de respuesta
                     .outputConfig(OutputConfig.builder().effort(OutputConfig.Effort.LOW).build())
                     .build();
 
             Message respuesta = client.messages().create(params);
+            log.info("Tokens: entrada {} + caché leída {} + caché escrita {}, salida {}",
+                    respuesta.usage().inputTokens(),
+                    respuesta.usage().cacheReadInputTokens().orElse(0L),
+                    respuesta.usage().cacheCreationInputTokens().orElse(0L),
+                    respuesta.usage().outputTokens());
             mensajes.add(respuesta.toParam());
 
             List<ContentBlockParam> resultados = new ArrayList<>();
@@ -288,7 +332,7 @@ public class CerebroClaude {
             for (ContentBlock bloque : respuesta.content()) {
                 bloque.text().ifPresent(t -> textoMensaje.append(t.text()));
                 bloque.serverToolUse().ifPresent(uso ->
-                        log.info("Claude busca en internet: {}", uso._input()));
+                        log.info("Claude usa internet ({}): {}", uso.name(), uso._input()));
                 bloque.toolUse().ifPresent(uso -> {
                     String resultado = ejecutarHerramienta(uso, acciones);
                     resultados.add(ContentBlockParam.ofToolResult(ToolResultBlockParam.builder()
@@ -438,6 +482,10 @@ public class CerebroClaude {
             case "corregir_recuerdo" -> memoria.corregir(texto(entrada.get("buscar")), texto(entrada.get("nuevo")));
             case "olvidar" -> memoria.olvidar(texto(entrada.get("buscar")));
             case "cambiar_volumen" -> cambiarVolumen(entrada, acciones);
+            case "mover_cabeza" -> moverCabeza(entrada, acciones);
+            case "medir_distancia" -> medirDistancia();
+            case "gesto_cabeza" -> gestoCabeza(entrada, acciones);
+            case "seguir_mano" -> seguirMano(entrada, acciones);
             case "mostrar_en_pantalla" -> mostrarEnPantalla(entrada, acciones);
             case "quitar_pantalla" -> {
                 estado.mostrarPantalla(null);
@@ -488,6 +536,84 @@ public class CerebroClaude {
         return robot.hayRobotConectado()
                 ? hecho
                 : hecho + " (Aviso: ahora mismo no hay ninguna ESP32 conectada, así que no te has movido de verdad.)";
+    }
+
+    /** Lo más que gira la cabeza a cada lado (también lo limita la ESP32). */
+    private static final int GIRO_MAX_CABEZA = 70;
+    /** Lo que se deja a cada giro de cabeza antes del siguiente movimiento en cola. */
+    private static final long MS_GIRO_CABEZA = 700;
+
+    private String moverCabeza(Map<String, Object> entrada, List<Map<String, Object>> acciones) {
+        long grados = recortar(numero(entrada.get("grados"), 0), -GIRO_MAX_CABEZA, GIRO_MAX_CABEZA);
+        if (msMovimientoTurno + MS_GIRO_CABEZA > maxMsMovimientoTurno) {
+            return "Error: no hecho. Ya has encadenado demasiados movimientos en esta respuesta.";
+        }
+        msMovimientoTurno += MS_GIRO_CABEZA;
+        Map<String, Object> comando = new LinkedHashMap<>();
+        comando.put("cmd", "cabeza");
+        comando.put("grados", grados);
+        // En la misma cola que las ruedas: "mira a la izquierda y luego a la derecha" sale en orden
+        robot.encolarMovimiento(comando, MS_GIRO_CABEZA);
+        acciones.add(comando);
+        String donde = grados == 0 ? "al frente" : Math.abs(grados) + " grados a tu " + (grados > 0 ? "izquierda" : "derecha");
+        return robot.hayRobotConectado()
+                ? "Cabeza girando: mirarás " + donde + "."
+                : "Cabeza: " + donde + " (Aviso: no hay ninguna ESP32 conectada, así que no se ha movido de verdad.)";
+    }
+
+    /** Gestos: cada paso es {grados, ms hasta el siguiente}. */
+    private static final Map<String, long[][]> GESTOS = Map.of(
+            "negar", new long[][] {{25, 250}, {-25, 300}, {25, 300}, {-25, 300}, {0, 250}},
+            "mirar_alrededor", new long[][] {{60, 900}, {-60, 1300}, {0, 700}});
+
+    private String gestoCabeza(Map<String, Object> entrada, List<Map<String, Object>> acciones) {
+        String gesto = String.valueOf(entrada.get("gesto"));
+        long[][] pasos = GESTOS.get(gesto);
+        if (pasos == null) {
+            return "Error: gesto no válido. Usa uno de " + GESTOS.keySet();
+        }
+        long total = 0;
+        for (long[] paso : pasos) {
+            total += paso[1];
+        }
+        if (msMovimientoTurno + total > maxMsMovimientoTurno) {
+            return "Error: no hecho. Ya has encadenado demasiados movimientos en esta respuesta.";
+        }
+        msMovimientoTurno += total;
+        for (long[] paso : pasos) {
+            robot.encolarMovimiento(Map.of("cmd", "cabeza", "grados", paso[0]), paso[1]);
+        }
+        acciones.add(Map.of("cmd", "gesto", "gesto", gesto));
+        return robot.hayRobotConectado()
+                ? "Gesto en marcha: " + gesto + "."
+                : "Gesto: " + gesto + " (Aviso: no hay ninguna ESP32 conectada, así que no se ha movido de verdad.)";
+    }
+
+    private String seguirMano(Map<String, Object> entrada, List<Map<String, Object>> acciones) {
+        boolean activar = !Boolean.FALSE.equals(entrada.get("activar"));
+        Map<String, Object> comando = Map.of("cmd", "seguir", "activo", activar);
+        robot.enviarComando(comando);
+        acciones.add(comando);
+        if (!robot.hayRobotConectado()) {
+            return "Aviso: no hay ninguna ESP32 conectada, así que no puedes seguir nada.";
+        }
+        return activar
+                ? "Siguiendo la mano: que la pongan delante de tus ojos, a un palmo."
+                : "Has dejado de seguir la mano.";
+    }
+
+    private String medirDistancia() {
+        Integer cm = robot.pedirDistancia();
+        if (cm == null) {
+            return "No he podido medir: no hay ninguna ESP32 conectada o no contesta.";
+        }
+        if (cm == -2) {
+            return "No he podido medir: el sensor de ultrasonidos no contesta (puede que esté desconectado).";
+        }
+        if (cm < 0) {
+            return "No hay nada delante en unos cuatro metros (o está demasiado lejos o es blando y no rebota).";
+        }
+        return "Lo que tienes delante (hacia donde mira tu cabeza) está a " + cm + " centímetros.";
     }
 
     private String ponerCara(Map<String, Object> entrada, List<Map<String, Object>> acciones) {
@@ -623,6 +749,76 @@ public class CerebroClaude {
                                                 + duracionMaxMs + ")")))
                                 .build())
                         .required(List.of("accion", "velocidad", "duracion_ms"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaCabeza() {
+        return Tool.builder()
+                .name("mover_cabeza")
+                .description("Gira tu cabeza a un lado. Se queda mirando ahí hasta que la vuelvas a mover; "
+                        + "vuelve al frente (0) cuando acabes. Para secuencias (decir que no, mirar a los dos "
+                        + "lados) haz varias llamadas: se hacen en orden, junto con las ruedas.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("grados", JsonValue.from(Map.of(
+                                        "type", "integer",
+                                        "description", "Hacia dónde mirar: 0 al frente, positivo a tu izquierda, "
+                                                + "negativo a tu derecha (como mucho " + GIRO_MAX_CABEZA + " a cada lado)")))
+                                .build())
+                        .required(List.of("grados"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaGesto() {
+        return Tool.builder()
+                .name("gesto_cabeza")
+                .description("Hace un gesto con la cabeza: negar (decir que no) o mirar_alrededor. "
+                        + "Al acabar, la cabeza vuelve al frente.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("gesto", JsonValue.from(Map.of(
+                                        "type", "string",
+                                        "enum", List.of("negar", "mirar_alrededor"),
+                                        "description", "Qué gesto hacer")))
+                                .build())
+                        .required(List.of("gesto"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaSeguir() {
+        return Tool.builder()
+                .name("seguir_mano")
+                .description("Empieza o deja de seguir una mano con tus ojos de ultrasonidos (te quedas a unos "
+                        + "20 cm, girando hacia ella). Para sola si la pierde unos segundos o al minuto.")
+                .strict(true)
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder()
+                                .putAdditionalProperty("activar", JsonValue.from(Map.of(
+                                        "type", "boolean",
+                                        "description", "true para empezar a seguir, false para parar")))
+                                .build())
+                        .required(List.of("activar"))
+                        .putAdditionalProperty("additionalProperties", JsonValue.from(false))
+                        .build())
+                .build();
+    }
+
+    private Tool herramientaDistancia() {
+        return Tool.builder()
+                .name("medir_distancia")
+                .description("Mide con tus ojos de ultrasonidos a cuántos centímetros está lo que tienes delante, "
+                        + "hacia donde mira tu cabeza (espera a que acaben los movimientos pedidos antes). "
+                        + "Alcance de unos 4 metros; no dice qué es el objeto.")
+                .inputSchema(Tool.InputSchema.builder()
+                        .properties(Tool.InputSchema.Properties.builder().build())
                         .putAdditionalProperty("additionalProperties", JsonValue.from(false))
                         .build())
                 .build();
